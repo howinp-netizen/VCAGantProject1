@@ -444,15 +444,22 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 }
 .row-side:hover { background: var(--panel-2); }
 .row-side.selected { background: var(--accent-soft); }
-.row-side > .side-col-name { padding-left: 12px; }
-.row-side.indent-1 > .side-col-name { padding-left: 32px !important; }
-.row-side.indent-2 > .side-col-name { padding-left: 52px !important; }
+/* Indent / left-padding rules for name cells live further down in the file
+   (combined with the absolutely-positioned delete button). */
 
 .expand-icon {
   width: 14px; display: inline-block; text-align: center; color: var(--text-faint);
   font-size: 10px; margin-right: 4px; cursor: pointer; user-select: none; flex-shrink: 0;
 }
 .expand-icon.placeholder { visibility: hidden; }
+
+.vis-badge {
+  font-size: 11px; margin: 0 4px; opacity: 0.85;
+  flex-shrink: 0; cursor: help;
+  filter: grayscale(0.3);
+}
+.vis-badge.vis-engineers { color: var(--accent); }
+.vis-badge.vis-private { color: var(--danger, #c97a6e); }
 
 /* Inline + button on project / milestone rows for adding milestones / tasks.
    Hidden by default, fades in on row hover. Sits at the right of the name text
@@ -471,6 +478,63 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
   background: var(--accent); color: #1a1410;
   border-color: var(--accent); opacity: 1;
 }
+
+/* Inline delete button on each row — absolutely positioned at the row's
+   leftmost edge so it stays aligned across all rows regardless of indent
+   level (project / milestone / task). Hidden until row hover. */
+.row-side { position: relative; }
+.row-delete-btn {
+  position: absolute; left: 4px; top: 50%; transform: translateY(-50%);
+  z-index: 5;
+  width: 16px; height: 16px; padding: 0; margin: 0;
+  background: transparent; border: 1px solid transparent;
+  color: var(--text-faint); font-size: 14px; line-height: 1;
+  cursor: pointer; border-radius: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  opacity: 0;
+  transition: opacity 0.1s, background 0.1s, color 0.1s, border-color 0.1s;
+}
+.row-side:hover .row-delete-btn { opacity: 0.6; }
+.row-delete-btn:hover {
+  background: var(--danger, #c97a6e); color: #1a1410;
+  border-color: var(--danger, #c97a6e); opacity: 1;
+}
+
+/* Indent levels need extra left padding so the (absolute) delete button
+   doesn't overlap the expand caret / name. */
+.row-side > .side-col-name { padding-left: 28px; }
+.row-side.indent-1 > .side-col-name { padding-left: 28px !important; }
+.row-side.indent-2 > .side-col-name { padding-left: 28px !important; }
+/* Re-apply indent visually via the expand-icon's margin instead of the cell's
+   padding, so all delete buttons line up at the same x position. */
+.row-side.indent-1 .expand-icon { margin-left: 16px; }
+.row-side.indent-2 .expand-icon { margin-left: 32px; }
+
+/* Inline rename input replaces the name-text content during editing. Sized to
+   match the surrounding text so the row doesn't jump. */
+.inline-rename-input {
+  width: 100%;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 3px;
+  padding: 2px 6px; margin: 0;
+  font-family: inherit; font-size: inherit; line-height: inherit;
+  outline: none;
+}
+
+/* Small ✏️ icon at end of the name text — affordance for "double-click to
+   rename". Hidden by default, fades in on hover. Click also triggers rename. */
+.rename-edit-icon {
+  display: inline-block; margin-left: 6px; font-size: 9px;
+  cursor: pointer; user-select: none; vertical-align: middle;
+  opacity: 0; transition: opacity 0.1s;
+  filter: grayscale(0.4);
+}
+.row-side:hover .rename-edit-icon { opacity: 0.7; }
+.rename-edit-icon:hover { opacity: 1; filter: none; }
+
+/* Name text is selectable for double-click but should not show text-cursor
+   on single-click since single-click goes to the detail panel. */
+.name-text[data-rename] { cursor: pointer; user-select: none; }
 
 .name-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cat-text {
@@ -942,6 +1006,7 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
       <button class="btn small" id="qfClient" title="Filter by client">⊕ Client</button>
       <button class="btn small" id="qfManager" title="Filter by project manager (owner)">⊕ Project Manager</button>
       <button class="btn small" id="qfEngineer" title="Filter by assigned team member">⊕ Manager</button>
+      <button class="btn small" id="qfVisibility" title="Filter by visibility (shared / engineers / private)">⊕ Visibility</button>
     </div>
     <span class="filter-separator" id="filterSeparator" title="Click to collapse/expand · drag to reorder"></span>
     <div class="filter-group" id="filterGroupMore">
@@ -1327,6 +1392,11 @@ const FILTER_TYPES = {
   milestone_status: { label: 'Milestone Status', getOptions: () =>
     STATE.data.statuses.map(s => ({ value: s.id, label: s.name }))
   },
+  visibility: { label: 'Visibility', getOptions: () => [
+    { value: 'shared',    label: '🌐 Shared (everyone)' },
+    { value: 'engineers', label: '👥 Engineers/Managers only' },
+    { value: 'private',   label: '🔒 Private (owner only)' },
+  ]},
   due_range: { label: 'Due Within', getOptions: () => [
     { value: 'overdue', label: 'Overdue' },
     { value: '7',  label: 'Next 7 days' },
@@ -1382,7 +1452,34 @@ function projectPassesFilters(p) {
   return true;
 }
 
+// Visibility / privacy for milestones
+//
+// Each milestone has a `visibility` field with one of three values:
+//   'shared'    — visible to everyone (default; only this kind syncs to Outlook)
+//   'engineers' — visible only to users whose role is 'engineer' (engineers + managers)
+//   'private'   — visible only to the milestone's owner (createdBy)
+//
+// A milestone with no visibility field is treated as 'shared' for backwards compatibility.
+function canSeeMilestone(m) {
+  const vis = m.visibility || 'shared';
+  if (vis === 'shared') return true;
+  const me = STATE.data.currentUserId;
+  if (!me) return vis === 'shared'; // no logged-in user → only shared visible
+  // Owner always sees their own
+  if (m.createdBy === me) return true;
+  if (vis === 'engineers') {
+    const meEng = getEngineer(me);
+    // 'engineer' role users (engineers + managers) can see; drafters can't
+    return meEng && meEng.role === 'engineer';
+  }
+  // 'private' — only owner, already returned true above
+  return false;
+}
+
 function milestonePassesFilters(m) {
+  // Visibility check first — drafters never see private/engineer-only milestones
+  if (!canSeeMilestone(m)) return false;
+
   for (const f of STATE.filters) {
     if (f.type === 'milestone_status' && m.statusId !== f.value) return false;
     if (f.type === 'category' && m.categoryId !== f.value) return false;
@@ -1395,6 +1492,7 @@ function milestonePassesFilters(m) {
       const inTask = (m.tasks || []).some(t => t.assigneeId === f.value);
       if (!inAssign && !inTask) return false;
     }
+    if (f.type === 'visibility' && (m.visibility || 'shared') !== f.value) return false;
     if (f.type === 'due_range') {
       if (!m.dueDate) return false;
       const d = parseDate(m.dueDate);
@@ -1475,6 +1573,7 @@ function renderFilterBar() {
   setBadge('#qfClient', 'client');
   setBadge('#qfManager', 'manager');
   setBadge('#qfEngineer', 'engineer');
+  setBadge('#qfVisibility', 'visibility');
 
   refreshSortButtonLabel();
   applyFilterBarLayout();
@@ -2402,7 +2501,7 @@ function renderGanttSideRow(row) {
     return `
       <div class="row project-row">
         <div class="row-side ${sel}" data-type="project" data-project-id="${p.id}">
-          ${wrap('name', `<span class="expand-icon" data-toggle="project" data-project-id="${p.id}">${expandIcon}</span><span class="name-text" title="${escapeHtml(p.name)}">${numLabel}${escapeHtml(p.name)}</span><button class="row-add-btn" data-add="milestone" data-project-id="${p.id}" title="Add milestone">+</button>`)}
+          ${wrap('name', `<button class="row-delete-btn" data-delete="project" data-project-id="${p.id}" title="Delete project">×</button><span class="expand-icon" data-toggle="project" data-project-id="${p.id}">${expandIcon}</span><span class="name-text" data-rename="project" data-project-id="${p.id}" title="Click to open · double-click to rename">${numLabel}${escapeHtml(p.name)}<span class="rename-edit-icon" title="Rename">✏️</span></span><button class="row-add-btn" data-add="milestone" data-project-id="${p.id}" title="Add milestone">+</button>`)}
           ${wrap('client', `<span class="client-text" title="${escapeHtml(p.client || '')}">${p.client ? escapeHtml(p.client) : '<span class=\"editable-empty\">—</span>'}</span>`)}
           ${wrap('mgr', `<span class="editable-cell" data-edit-cell="manager" data-project-id="${p.id}" title="Click to change manager">${mgrCell}</span>`)}
           ${wrap('assign', assignCell)}
@@ -2437,15 +2536,20 @@ function renderGanttSideRow(row) {
     const progress = (typeof m.progress === 'number') ? m.progress : 0;
     const progressIcon = `<span class="mini-progress" data-edit-cell="progress" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Progress: ${progress}% — click to change"><span class="mini-progress-fill" style="width:${progress}%; background:${cat ? cat.color : 'var(--accent)'};"></span></span>`;
 
+    // Visibility badge — shared has no badge (default), restricted ones get a small lock/group icon
+    const vis = m.visibility || 'shared';
+    const visBadge = vis === 'shared' ? '' :
+      `<span class="vis-badge vis-${vis}" title="${vis === 'engineers' ? 'Visible to engineers/managers only' : 'Private — only the owner sees this'}">${vis === 'engineers' ? '👥' : '🔒'}</span>`;
+
     return `
       <div class="row milestone-row">
         <div class="row-side indent-1 ${sel}" data-type="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">
-          ${wrap('name', `<span class="expand-icon ${expandClass}" data-toggle="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">${expandIcon || '·'}</span><span class="name-text" title="${escapeHtml(m.name)}">◆ ${escapeHtml(m.name)}</span>${progressIcon}<button class="row-add-btn" data-add="task" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Add task to this milestone">+</button>`)}
+          ${wrap('name', `<button class="row-delete-btn" data-delete="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Delete milestone">×</button><span class="expand-icon ${expandClass}" data-toggle="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">${expandIcon || '·'}</span><span class="name-text" data-rename="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Click to open · double-click to rename">◆ ${escapeHtml(m.name)}<span class="rename-edit-icon" title="Rename">✏️</span></span>${visBadge}${progressIcon}<button class="row-add-btn" data-add="task" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Add task to this milestone">+</button>`)}
           ${wrap('client', '')}
           ${wrap('mgr', '')}
           ${wrap('assign', `<span class="editable-cell" data-edit-cell="assignees" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Click to assign">${assignCell}</span>`)}
           ${wrap('cat', `<span class="editable-cell" data-edit-cell="category" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Click to change category">${catCell}</span>`)}
-          ${wrap('due', `<span class="due-text ${urg}">${m.dueDate ? formatShortDate(m.dueDate) : '—'}</span>`)}
+          ${wrap('due', `<span class="editable-cell" data-edit-cell="m_due" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Click to change due date"><span class="due-text ${urg}">${m.dueDate ? formatShortDate(m.dueDate) : '— set —'}</span></span>`)}
           ${wrap('status', `<span class="editable-cell" data-edit-cell="m_status" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Click to change status"><span class="status-text" style="color:${status.color}">${escapeHtml(status.name)}</span></span>`)}
         </div>
       </div>`;
@@ -2463,12 +2567,12 @@ function renderGanttSideRow(row) {
     return `
       <div class="row">
         <div class="row-side indent-2 ${sel}" data-type="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}">
-          ${wrap('name', `<span class="expand-icon placeholder">·</span><span class="name-text" style="color: var(--text-dim); font-size: 11px;">${escapeHtml(t.name || '(unnamed task)')}</span>`)}
+          ${wrap('name', `<button class="row-delete-btn" data-delete="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" title="Delete task">×</button><span class="expand-icon placeholder">·</span><span class="name-text" data-rename="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" style="color: var(--text-dim); font-size: 11px;" title="Click to open · double-click to rename">${escapeHtml(t.name || '(unnamed task)')}<span class="rename-edit-icon" title="Rename">✏️</span></span>`)}
           ${wrap('client', '')}
           ${wrap('mgr', '')}
           ${wrap('assign', `<span class="editable-cell" data-edit-cell="t_assignee" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" title="Click to change assignee">${assignCell}</span>`)}
           ${wrap('cat', '')}
-          ${wrap('due', `<span class="due-text" style="font-size:10px;">${range}</span>`)}
+          ${wrap('due', `<span class="editable-cell" data-edit-cell="t_dates" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" title="Click to change task dates"><span class="due-text" style="font-size:10px;">${range}</span></span>`)}
           ${wrap('status', '')}
         </div>
       </div>`;
@@ -2606,7 +2710,7 @@ function attachGanttEvents() {
         discardEdits();
         const p = getProject(projectId);
         if (!p) return;
-        const newM = { id: uid('m'), name: 'New Milestone', categoryId: '', statusId: 'st_notstarted', dueDate: '', assigneeIds: [], tasks: [], notes: '', progress: 0 };
+        const newM = { id: uid('m'), name: 'New Milestone', categoryId: '', statusId: 'st_notstarted', dueDate: '', assigneeIds: [], tasks: [], notes: '', progress: 0, visibility: 'shared', createdBy: STATE.data.currentUserId || '' };
         if (!p.milestones) p.milestones = [];
         p.milestones.push(newM);
         p.expanded = true;  // ensure the new milestone is visible
@@ -2631,6 +2735,62 @@ function attachGanttEvents() {
     });
   });
 
+  // Inline delete buttons on each row. Always confirm before deleting because
+  // there's no undo for milestones/tasks/projects.
+  $$('[data-delete]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const what = el.dataset.delete;
+      const projectId = el.dataset.projectId;
+      const milestoneId = el.dataset.milestoneId;
+      const taskId = el.dataset.taskId;
+      if (what === 'project') {
+        const p = getProject(projectId);
+        if (!p) return;
+        const milestoneCount = (p.milestones || []).length;
+        const taskCount = (p.milestones || []).reduce((n, m) => n + (m.tasks || []).length, 0);
+        const detail = milestoneCount > 0
+          ? ` This will also delete ${milestoneCount} milestone${milestoneCount === 1 ? '' : 's'}${taskCount > 0 ? ` and ${taskCount} task${taskCount === 1 ? '' : 's'}` : ''}.`
+          : '';
+        if (!confirm(`Delete project "${p.name}"?${detail}\n\nThis cannot be undone.`)) return;
+        const idx = STATE.data.projects.findIndex(x => x.id === projectId);
+        if (idx >= 0) STATE.data.projects.splice(idx, 1);
+        if (STATE.selectedItem?.projectId === projectId) STATE.selectedItem = null;
+        saveData();
+        renderAll();
+        toast(`Deleted project "${p.name}"`, 'success');
+      } else if (what === 'milestone') {
+        const p = getProject(projectId);
+        const m = getMilestone(projectId, milestoneId);
+        if (!p || !m) return;
+        const taskCount = (m.tasks || []).length;
+        const detail = taskCount > 0 ? ` This will also delete ${taskCount} task${taskCount === 1 ? '' : 's'}.` : '';
+        if (!confirm(`Delete milestone "${m.name}"?${detail}\n\nThis cannot be undone.`)) return;
+        const idx = (p.milestones || []).findIndex(x => x.id === milestoneId);
+        if (idx >= 0) p.milestones.splice(idx, 1);
+        logHistory(projectId, `Deleted milestone "${m.name}"`);
+        if (STATE.selectedItem?.milestoneId === milestoneId) STATE.selectedItem = null;
+        saveData();
+        renderAll();
+        toast(`Deleted milestone "${m.name}"`, 'success');
+      } else if (what === 'task') {
+        const m = getMilestone(projectId, milestoneId);
+        if (!m) return;
+        const t = (m.tasks || []).find(x => x.id === taskId);
+        if (!t) return;
+        const label = t.name || '(unnamed task)';
+        if (!confirm(`Delete task "${label}"?\n\nThis cannot be undone.`)) return;
+        const idx = (m.tasks || []).findIndex(x => x.id === taskId);
+        if (idx >= 0) m.tasks.splice(idx, 1);
+        logHistory(projectId, `Deleted task "${label}" from "${m.name}"`);
+        if (STATE.selectedItem?.taskId === taskId) STATE.selectedItem = null;
+        saveData();
+        renderAll();
+        toast(`Deleted task "${label}"`, 'success');
+      }
+    });
+  });
+
   // Inline-editable cells (manager, assignees, category, milestone status, task assignee, progress)
   $$('[data-edit-cell]').forEach(el => {
     el.addEventListener('click', (e) => {
@@ -2645,6 +2805,29 @@ function attachGanttEvents() {
       else if (kind === 'm_status') openStatusPopup(el, projectId, milestoneId);
       else if (kind === 't_assignee') openTaskAssigneePopup(el, projectId, milestoneId, taskId);
       else if (kind === 'progress') openProgressPopup(el, projectId, milestoneId);
+      else if (kind === 'm_due') openDueDatePopup(el, projectId, milestoneId);
+      else if (kind === 't_dates') openTaskDatesPopup(el, projectId, milestoneId, taskId);
+    });
+  });
+
+  // Rename: double-click on the name OR click on the small ✏️ icon (which
+  // appears on hover). Single click is preserved for opening the detail panel.
+  // Pressing F2 while a row is selected also triggers rename.
+  $$('[data-rename]').forEach(el => {
+    el.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      // Clear selection that double-click otherwise creates
+      window.getSelection?.()?.removeAllRanges?.();
+      openRenameInline(el, el.dataset.projectId, el.dataset.milestoneId, el.dataset.taskId);
+    });
+  });
+  $$('.rename-edit-icon').forEach(icon => {
+    icon.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const nameSpan = icon.closest('[data-rename]');
+      if (!nameSpan) return;
+      openRenameInline(nameSpan, nameSpan.dataset.projectId, nameSpan.dataset.milestoneId, nameSpan.dataset.taskId);
     });
   });
 
@@ -2694,6 +2877,7 @@ function attachGanttEvents() {
       if (e.target.closest('[data-toggle]')) return;
       if (e.target.closest('[data-edit-cell]')) return;
       if (e.target.closest('[data-add]')) return;
+      if (e.target.closest('[data-delete]')) return;
       handleSelectClick({
         type: el.dataset.type,
         projectId: el.dataset.projectId,
@@ -3178,6 +3362,171 @@ function openProgressPopup(anchor, projectId, milestoneId) {
   });
 }
 
+// Inline due-date editor for milestones. Shows a native date input + Clear/Cancel.
+function openDueDatePopup(anchor, projectId, milestoneId) {
+  const m = getMilestone(projectId, milestoneId);
+  if (!m) return;
+  const cur = m.dueDate || '';
+  const html = `
+    <div style="padding:10px 12px; min-width: 220px;">
+      <div style="font-size:11px; color:var(--accent); font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">
+        Due date
+      </div>
+      <input type="date" class="field-input" id="duDateInput" value="${escapeHtml(cur)}" style="width:100%; margin-bottom:8px;" />
+      <div style="display:flex; gap:6px;">
+        <button class="btn small primary" id="duApply" style="flex:1;">Apply</button>
+        <button class="btn small" id="duClear">Clear</button>
+        <button class="btn small" id="duCancel">Cancel</button>
+      </div>
+    </div>
+  `;
+  const popup = showPopup(anchor, html);
+  const input = popup.querySelector('#duDateInput');
+  setTimeout(() => { input?.focus(); }, 30);
+  const apply = (newVal) => {
+    const old = cur || '(none)';
+    const next = newVal || '';
+    if (next === cur) { closePopup(); return; }
+    m.dueDate = next;
+    logHistory(projectId, `"${m.name}" due date: ${old} → ${next || '(none)'}`);
+    saveData();
+    closePopup();
+    renderAll();
+    toast(next ? `Due date: ${next}` : 'Due date cleared', 'success');
+  };
+  popup.querySelector('#duApply').addEventListener('click', (e) => { e.stopPropagation(); apply(input.value); });
+  popup.querySelector('#duClear').addEventListener('click', (e) => { e.stopPropagation(); apply(''); });
+  popup.querySelector('#duCancel').addEventListener('click', (e) => { e.stopPropagation(); closePopup(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); apply(input.value); }
+    if (e.key === 'Escape') { e.preventDefault(); closePopup(); }
+  });
+}
+
+// Inline date-range editor for tasks (start/end).
+function openTaskDatesPopup(anchor, projectId, milestoneId, taskId) {
+  const m = getMilestone(projectId, milestoneId);
+  if (!m) return;
+  const t = (m.tasks || []).find(x => x.id === taskId);
+  if (!t) return;
+  const html = `
+    <div style="padding:10px 12px; min-width: 240px;">
+      <div style="font-size:11px; color:var(--accent); font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">
+        Task dates
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px; margin-bottom:8px;">
+        <label style="font-size:10px; color:var(--text-faint);">Start
+          <input type="date" class="field-input" id="tdStart" value="${escapeHtml(t.start || '')}" style="width:100%; margin-top:2px;" />
+        </label>
+        <label style="font-size:10px; color:var(--text-faint);">End
+          <input type="date" class="field-input" id="tdEnd" value="${escapeHtml(t.end || '')}" style="width:100%; margin-top:2px;" />
+        </label>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <button class="btn small primary" id="tdApply" style="flex:1;">Apply</button>
+        <button class="btn small" id="tdCancel">Cancel</button>
+      </div>
+    </div>
+  `;
+  const popup = showPopup(anchor, html);
+  const startInput = popup.querySelector('#tdStart');
+  const endInput = popup.querySelector('#tdEnd');
+  setTimeout(() => startInput?.focus(), 30);
+  const apply = () => {
+    const newStart = startInput.value;
+    const newEnd = endInput.value;
+    if (newStart && newEnd && newStart > newEnd) {
+      toast('Start date must be ≤ end date', 'error');
+      return;
+    }
+    if (newStart === t.start && newEnd === t.end) { closePopup(); return; }
+    const oldRange = `${t.start || '?'} → ${t.end || '?'}`;
+    const newRange = `${newStart || '?'} → ${newEnd || '?'}`;
+    t.start = newStart;
+    t.end = newEnd;
+    logHistory(projectId, `Task dates: ${oldRange} → ${newRange}`);
+    saveData();
+    closePopup();
+    renderAll();
+    toast('Task dates updated', 'success');
+  };
+  popup.querySelector('#tdApply').addEventListener('click', (e) => { e.stopPropagation(); apply(); });
+  popup.querySelector('#tdCancel').addEventListener('click', (e) => { e.stopPropagation(); closePopup(); });
+  [startInput, endInput].forEach(inp => inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); apply(); }
+    if (e.key === 'Escape') { e.preventDefault(); closePopup(); }
+  }));
+}
+
+// Inline rename — replaces the cell's text with an input bound to the row's
+// project/milestone/task.
+function openRenameInline(anchor, projectId, milestoneId, taskId) {
+  // Determine current name and where it lives
+  let target = null;
+  let kind = '';
+  if (taskId) {
+    const m = getMilestone(projectId, milestoneId);
+    target = (m?.tasks || []).find(x => x.id === taskId);
+    kind = 'task';
+  } else if (milestoneId) {
+    target = getMilestone(projectId, milestoneId);
+    kind = 'milestone';
+  } else {
+    target = getProject(projectId);
+    kind = 'project';
+  }
+  if (!target) return;
+  const oldName = target.name || '';
+
+  // Replace the visible name span with an input. The anchor IS the name-text
+  // span (we attached data-edit-cell="rename" directly to it).
+  const nameSpan = anchor.classList.contains('name-text')
+    ? anchor
+    : anchor.querySelector('.name-text');
+  if (!nameSpan || nameSpan.dataset.editing === '1') return;
+  nameSpan.dataset.editing = '1';
+  const originalHtml = nameSpan.innerHTML;
+  nameSpan.innerHTML = `<input type="text" class="inline-rename-input" value="${escapeHtml(oldName)}" />`;
+  const input = nameSpan.querySelector('input');
+  input.focus();
+  input.select();
+
+  let committed = false;
+  const cleanup = () => {
+    nameSpan.dataset.editing = '';
+  };
+  const commit = () => {
+    if (committed) return;
+    committed = true;
+    const newName = input.value.trim();
+    if (!newName || newName === oldName) {
+      // restore original
+      nameSpan.innerHTML = originalHtml;
+      cleanup();
+      return;
+    }
+    target.name = newName;
+    logHistory(projectId, `Renamed ${kind}: "${oldName}" → "${newName}"`);
+    saveData();
+    cleanup();
+    renderAll();
+    toast(`Renamed to "${newName}"`, 'success');
+  };
+  const cancel = () => {
+    if (committed) return;
+    committed = true;
+    nameSpan.innerHTML = originalHtml;
+    cleanup();
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
+  input.addEventListener('blur', commit);
+  input.addEventListener('click', (e) => e.stopPropagation());
+}
+
 function openQuickAddMilestone() {
   if (STATE.data.projects.length === 0) {
     toast('Create a project first', 'error');
@@ -3265,6 +3614,8 @@ function quickAddMilestoneSubmit() {
     tasks: [],
     notes: '',
     progress: 0,
+    visibility: 'shared',
+    createdBy: STATE.data.currentUserId || '',
   };
   if (!p.milestones) p.milestones = [];
   p.milestones.push(newM);
@@ -3691,9 +4042,22 @@ function renderMilestoneDetail(pid, mid) {
           <select class="field-input" data-edit="statusId">${statusOpts}</select>
         </div>
       </div>
-      <div class="field-group">
-        <label class="field-label">Due Date</label>
-        <input class="field-input" type="date" data-edit="dueDate" value="${eff.dueDate || ''}" />
+      <div class="field-row">
+        <div class="field-group">
+          <label class="field-label">Due Date</label>
+          <input class="field-input" type="date" data-edit="dueDate" value="${eff.dueDate || ''}" />
+        </div>
+        <div class="field-group">
+          <label class="field-label">Visibility ${(() => {
+            const owner = getEngineer(eff.createdBy);
+            return owner ? `<span style="font-size:9px; color:var(--text-faint); font-weight:400; margin-left:4px;">owner: ${escapeHtml(owner.name)}</span>` : '';
+          })()}</label>
+          <select class="field-input" data-edit="visibility">
+            <option value="shared"    ${(eff.visibility || 'shared') === 'shared' ? 'selected' : ''}>🌐 Shared (all)</option>
+            <option value="engineers" ${eff.visibility === 'engineers' ? 'selected' : ''}>👥 Engineers/Mgrs only</option>
+            <option value="private"   ${eff.visibility === 'private' ? 'selected' : ''}>🔒 Private (owner)</option>
+          </select>
+        </div>
       </div>
       <div class="field-group">
         <label class="field-label">Progress</label>
@@ -3874,7 +4238,7 @@ function handleDetailAction(action, el) {
     if (!maybeConfirmDiscard()) return;
     discardEdits();
     const p = getProject(projectId);
-    const newM = { id: uid('m'), name: 'New Milestone', categoryId: '', statusId: 'st_notstarted', dueDate: '', assigneeIds: [], tasks: [], notes: '' };
+    const newM = { id: uid('m'), name: 'New Milestone', categoryId: '', statusId: 'st_notstarted', dueDate: '', assigneeIds: [], tasks: [], notes: '', visibility: 'shared', createdBy: STATE.data.currentUserId || '' };
     if (!p.milestones) p.milestones = [];
     p.milestones.push(newM);
     logHistory(projectId, `Added milestone "${newM.name}"`);
@@ -5113,7 +5477,7 @@ function processCsvImport() {
       if (st) statusId = st.id;
     }
     p.milestones.push({
-      id: uid('m'), name: mileName, categoryId, statusId, dueDate, assigneeIds, tasks: [], notes: '',
+      id: uid('m'), name: mileName, categoryId, statusId, dueDate, assigneeIds, tasks: [], notes: '', visibility: 'shared', createdBy: STATE.data.currentUserId || '',
     });
     added++;
   }
@@ -5198,6 +5562,11 @@ function generateIcs() {
 
   for (const p of STATE.data.projects) {
     for (const m of (p.milestones || [])) {
+      // PRIVACY: only milestones marked 'shared' (or with no visibility set)
+      // are exported to calendar / Outlook. Engineers-only and private
+      // milestones stay inside the app.
+      if ((m.visibility || 'shared') !== 'shared') continue;
+
       const cat = getCategory(m.categoryId);
       const catLabel = cat ? `[${cat.name}] ` : '';
       if (incMs && m.dueDate) {
@@ -5490,6 +5859,7 @@ async function init() {
   $('#qfClient').addEventListener('click', (e) => openQuickFilterPicker(e.currentTarget, 'client'));
   $('#qfManager').addEventListener('click', (e) => openQuickFilterPicker(e.currentTarget, 'manager'));
   $('#qfEngineer').addEventListener('click', (e) => openQuickFilterPicker(e.currentTarget, 'engineer'));
+  $('#qfVisibility').addEventListener('click', (e) => openQuickFilterPicker(e.currentTarget, 'visibility'));
 
   // Filter separator: click to collapse Quick group, drag to swap group order.
   const sep = $('#filterSeparator');
@@ -5550,6 +5920,23 @@ async function init() {
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       e.preventDefault();
       openQuickAddMilestone();
+    }
+    // F2: rename the currently selected row in the Gantt side panel.
+    if (e.key === 'F2') {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const sel = STATE.selectedItem;
+      if (!sel) return;
+      // Find the corresponding rename anchor
+      let selector = '';
+      if (sel.type === 'project') selector = `.row-side[data-type="project"][data-project-id="${sel.projectId}"] [data-rename="project"]`;
+      else if (sel.type === 'milestone') selector = `[data-rename="milestone"][data-project-id="${sel.projectId}"][data-milestone-id="${sel.milestoneId}"]`;
+      else if (sel.type === 'task') selector = `[data-rename="task"][data-project-id="${sel.projectId}"][data-milestone-id="${sel.milestoneId}"][data-task-id="${sel.taskId}"]`;
+      const anchor = selector && document.querySelector(selector);
+      if (anchor) {
+        e.preventDefault();
+        openRenameInline(anchor, anchor.dataset.projectId, anchor.dataset.milestoneId, anchor.dataset.taskId);
+      }
     }
     if (e.key === 'Escape') {
       // Close popup if open
