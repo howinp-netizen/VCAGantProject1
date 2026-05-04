@@ -319,6 +319,28 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 .current-user-badge.unset:hover { background: rgba(201,122,110,0.15); }
 .current-user-badge .eng-dot { width: 10px; height: 10px; flex-shrink: 0; }
 
+.trash-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+}
+.trash-item:last-child { border-bottom: none; }
+.trash-item-icon {
+  flex-shrink: 0; width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--panel-2); border-radius: 4px;
+  font-size: 16px; color: var(--text-faint);
+}
+.trash-item-body { flex: 1; min-width: 0; }
+.trash-item-name {
+  font-weight: 500; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.trash-item-meta {
+  font-size: 11px; color: var(--text-faint); margin-top: 2px;
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
+.trash-item-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
 .popup-menu {
   position: fixed; background: var(--panel); border: 1px solid var(--border-strong);
   border-radius: 6px; padding: 6px; z-index: 200;
@@ -922,6 +944,18 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 
 .dirty-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dirty); margin-left: 6px; vertical-align: middle; }
 
+/* Compact icon-only buttons used for undo/redo and similar quick actions */
+.btn.icon-btn {
+  width: 30px; height: 30px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.btn.icon-btn:disabled {
+  opacity: 0.35; cursor: not-allowed;
+}
+.btn.icon-btn:disabled:hover {
+  background: transparent; border-color: var(--border);
+}
+
 @media (max-width: 900px) {
   .detail-panel { position: fixed; right: 0; top: 48px; bottom: 0; width: 100%; max-width: 380px; z-index: 50; }
   .search-box input { width: 140px; }
@@ -944,6 +978,14 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
     <div class="search-results" id="searchResults"></div>
   </div>
   <div class="topbar-right">
+    <div class="tool-group" style="margin-right: 4px;">
+      <button class="btn icon-btn" id="undoBtn" title="Undo (Cmd/Ctrl+Z)" disabled>
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8 H11 A3 3 0 0 1 11 14"/><polyline points="6,5 3,8 6,11"/></svg>
+      </button>
+      <button class="btn icon-btn" id="redoBtn" title="Redo (Cmd/Ctrl+Shift+Z)" disabled>
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8 H5 A3 3 0 0 0 5 14"/><polyline points="10,5 13,8 10,11"/></svg>
+      </button>
+    </div>
     <button class="current-user-badge" id="currentUserBadge" title="Click to change who you are">
       <span class="eng-dot" id="currentUserDot"></span>
       <span id="currentUserName" style="font-size: 11px;">Not set</span>
@@ -1349,6 +1391,7 @@ async function initFirebase() {
         STATE.data.statuses  = d.statuses  || STATE.data.statuses;
         STATE.data.categories = d.categories || STATE.data.categories;
         STATE.data.projects  = d.projects  || [];
+        STATE.data.trash     = d.trash     || STATE.data.trash || [];
         renderAll();
 
         // If we patched in missing VCA team members, push the patched roster
@@ -1366,8 +1409,359 @@ async function initFirebase() {
   }
 }
 
+// Permission: only signed-in engineers can create projects. Drafters and
+// unidentified users get a clear toast explaining why. Returns true if OK.
+function canCreateProject(showToast) {
+  const me = STATE.data.currentUserId ? getEngineer(STATE.data.currentUserId) : null;
+  if (!me) {
+    if (showToast) toast('Please identify yourself first (top-right badge)', 'error');
+    return false;
+  }
+  if (me.role !== 'engineer') {
+    if (showToast) toast('Only engineers can create projects.', 'error');
+    return false;
+  }
+  return true;
+}
+
 STATE._writerId = uid('w');
+
+// ============== UNDO / TRASH ==============
+//
+// Two layers of safety against accidental destructive changes:
+//
+//   1. Undo stack — each entry remembers the *before* and *after* state of
+//      the specific scope (project/milestone/task) the user just touched.
+//      Undo restores the "before" of that scope only, leaving everything
+//      else in the current STATE alone — including changes other users may
+//      have made since. This is critical for multi-user editing: my undo
+//      must not stomp on your concurrent edits to a different project.
+//
+//   2. Trash — when a project / milestone / task is deleted, it goes into
+//      STATE.data.trash (synced to Firestore) instead of being lost. Items
+//      stay there for 30 days, then are auto-purged. The Trash modal lets
+//      anyone restore items.
+//
+const UNDO_LIMIT = 30;
+const TRASH_DAYS = 30;
+STATE.undoStack = [];
+STATE.redoStack = [];
+STATE._suspendUndoCapture = false; // prevent capturing during an undo/redo itself
+
+function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
+
+// Capture an undo entry. The `target` describes which scope is being changed
+// so undo can restore just that scope and leave everything else alone:
+//
+//   { type: 'project',   id: projectId }                   — whole project
+//   { type: 'milestone', projectId, id: milestoneId }      — single milestone
+//   { type: 'task',      projectId, milestoneId, id }      — single task
+//   { type: 'projectsList' }                               — for create/delete of projects
+//   { type: 'milestonesList', projectId }                  — for create/delete of milestones
+//   { type: 'tasksList', projectId, milestoneId }          — for create/delete of tasks
+//   { type: 'trash' }                                      — for trash list changes
+//
+// The "before" snapshot is taken immediately, of just that scope. The "after"
+// is captured by the caller invoking saveData() (we sample STATE again then).
+function captureUndo(label, target) {
+  if (STATE._suspendUndoCapture) return;
+  if (!target) return; // require explicit scope so we don't accidentally over-undo
+  const before = readScope(target);
+  STATE.undoStack.push({
+    label: label || 'change',
+    target,
+    before: deepClone(before),
+    after: null, // filled in by saveData() after the change is applied
+    at: Date.now(),
+  });
+  if (STATE.undoStack.length > UNDO_LIMIT) STATE.undoStack.shift();
+  STATE.redoStack = [];
+}
+
+// Read the current value of the scope described by `target` from STATE.
+function readScope(target) {
+  if (target.type === 'project') {
+    return STATE.data.projects.find(p => p.id === target.id) || null;
+  }
+  if (target.type === 'milestone') {
+    const p = STATE.data.projects.find(x => x.id === target.projectId);
+    return (p?.milestones || []).find(m => m.id === target.id) || null;
+  }
+  if (target.type === 'task') {
+    const p = STATE.data.projects.find(x => x.id === target.projectId);
+    const m = (p?.milestones || []).find(x => x.id === target.milestoneId);
+    return (m?.tasks || []).find(t => t.id === target.id) || null;
+  }
+  if (target.type === 'projectsList') {
+    return STATE.data.projects;
+  }
+  if (target.type === 'milestonesList') {
+    const p = STATE.data.projects.find(x => x.id === target.projectId);
+    return p ? (p.milestones || []) : [];
+  }
+  if (target.type === 'tasksList') {
+    const p = STATE.data.projects.find(x => x.id === target.projectId);
+    const m = (p?.milestones || []).find(x => x.id === target.milestoneId);
+    return m ? (m.tasks || []) : [];
+  }
+  if (target.type === 'trash') {
+    return STATE.data.trash || [];
+  }
+  return null;
+}
+
+// Write a value back into the scope. For list-typed targets we replace the
+// whole list. For item-typed targets we replace the matching item, or insert
+// it back if it was deleted (null before == "didn't exist", value == "did").
+function writeScope(target, value) {
+  if (target.type === 'project') {
+    const idx = STATE.data.projects.findIndex(p => p.id === target.id);
+    if (value === null) {
+      if (idx >= 0) STATE.data.projects.splice(idx, 1);
+    } else {
+      if (idx >= 0) STATE.data.projects[idx] = deepClone(value);
+      else STATE.data.projects.push(deepClone(value));
+    }
+    return;
+  }
+  if (target.type === 'milestone') {
+    const p = STATE.data.projects.find(x => x.id === target.projectId);
+    if (!p) return;
+    if (!p.milestones) p.milestones = [];
+    const idx = p.milestones.findIndex(m => m.id === target.id);
+    if (value === null) {
+      if (idx >= 0) p.milestones.splice(idx, 1);
+    } else {
+      if (idx >= 0) p.milestones[idx] = deepClone(value);
+      else p.milestones.push(deepClone(value));
+    }
+    return;
+  }
+  if (target.type === 'task') {
+    const p = STATE.data.projects.find(x => x.id === target.projectId);
+    const m = (p?.milestones || []).find(x => x.id === target.milestoneId);
+    if (!m) return;
+    if (!m.tasks) m.tasks = [];
+    const idx = m.tasks.findIndex(t => t.id === target.id);
+    if (value === null) {
+      if (idx >= 0) m.tasks.splice(idx, 1);
+    } else {
+      if (idx >= 0) m.tasks[idx] = deepClone(value);
+      else m.tasks.push(deepClone(value));
+    }
+    return;
+  }
+  if (target.type === 'projectsList') {
+    STATE.data.projects = deepClone(value || []);
+    return;
+  }
+  if (target.type === 'milestonesList') {
+    const p = STATE.data.projects.find(x => x.id === target.projectId);
+    if (p) p.milestones = deepClone(value || []);
+    return;
+  }
+  if (target.type === 'tasksList') {
+    const p = STATE.data.projects.find(x => x.id === target.projectId);
+    const m = (p?.milestones || []).find(x => x.id === target.milestoneId);
+    if (m) m.tasks = deepClone(value || []);
+    return;
+  }
+  if (target.type === 'trash') {
+    STATE.data.trash = deepClone(value || []);
+    return;
+  }
+}
+
+// Called by saveData() right after a write succeeds, to finalize the most
+// recent undo entry's "after" snapshot.
+function finalizeUndoEntry() {
+  if (STATE._suspendUndoCapture) return;
+  const top = STATE.undoStack[STATE.undoStack.length - 1];
+  if (!top || top.after !== null) return;
+  top.after = deepClone(readScope(top.target));
+}
+
+function performUndo() {
+  if (STATE.undoStack.length === 0) {
+    toast('Nothing to undo', 'info');
+    return;
+  }
+  const entry = STATE.undoStack.pop();
+  // Refresh the "after" snapshot in case it wasn't finalized yet
+  if (entry.after === null) entry.after = deepClone(readScope(entry.target));
+  STATE.redoStack.push(entry);
+  STATE._suspendUndoCapture = true;
+  writeScope(entry.target, entry.before);
+  STATE._suspendUndoCapture = false;
+  saveData();
+  renderAll();
+  toast(`Undid: ${entry.label}`, 'success');
+}
+
+function performRedo() {
+  if (STATE.redoStack.length === 0) {
+    toast('Nothing to redo', 'info');
+    return;
+  }
+  const entry = STATE.redoStack.pop();
+  STATE.undoStack.push(entry);
+  STATE._suspendUndoCapture = true;
+  writeScope(entry.target, entry.after);
+  STATE._suspendUndoCapture = false;
+  saveData();
+  renderAll();
+  toast(`Redid: ${entry.label}`, 'success');
+}
+
+// Move an item to the trash with metadata describing what it was. The trash
+// entry includes enough context to restore the item back into its original
+// parent (project/milestone), even after other rearrangements.
+function moveToTrash(kind, item, context) {
+  if (!STATE.data.trash) STATE.data.trash = [];
+  const me = STATE.data.currentUserId ? getEngineer(STATE.data.currentUserId) : null;
+  STATE.data.trash.unshift({
+    id: uid('trash'),
+    kind,                    // 'project' | 'milestone' | 'task'
+    item: JSON.parse(JSON.stringify(item)),
+    context: context || {},  // { projectId, projectName, milestoneId, milestoneName }
+    deletedAt: new Date().toISOString(),
+    deletedBy: me ? me.name : null,
+    deletedById: me ? me.id : null,
+  });
+  // Auto-purge entries older than TRASH_DAYS
+  const cutoff = Date.now() - TRASH_DAYS * 24 * 60 * 60 * 1000;
+  STATE.data.trash = STATE.data.trash.filter(t => new Date(t.deletedAt).getTime() > cutoff);
+}
+
+function restoreFromTrash(trashId) {
+  if (!STATE.data.trash) return;
+  const idx = STATE.data.trash.findIndex(t => t.id === trashId);
+  if (idx < 0) return;
+  const entry = STATE.data.trash[idx];
+  // Capture two undo entries — one for the trash list change, one for the
+  // restored item's parent. We chain them so a single undo reverses both.
+  captureUndo(`restore ${entry.kind} from trash`, { type: 'trash' });
+  if (entry.kind === 'project') {
+    STATE.data.projects.push(entry.item);
+  } else if (entry.kind === 'milestone') {
+    const p = getProject(entry.context.projectId);
+    if (!p) {
+      toast('Original project no longer exists; cannot restore milestone here.', 'error');
+      return;
+    }
+    if (!p.milestones) p.milestones = [];
+    p.milestones.push(entry.item);
+  } else if (entry.kind === 'task') {
+    const m = getMilestone(entry.context.projectId, entry.context.milestoneId);
+    if (!m) {
+      toast('Original milestone no longer exists; cannot restore task here.', 'error');
+      return;
+    }
+    if (!m.tasks) m.tasks = [];
+    m.tasks.push(entry.item);
+  }
+  STATE.data.trash.splice(idx, 1);
+  saveData();
+  renderAll();
+  toast(`Restored ${entry.kind}: "${entry.item.name || '(unnamed)'}"`, 'success');
+}
+
+function permanentlyDeleteFromTrash(trashId) {
+  if (!STATE.data.trash) return;
+  const idx = STATE.data.trash.findIndex(t => t.id === trashId);
+  if (idx < 0) return;
+  const entry = STATE.data.trash[idx];
+  if (!confirm(`Permanently delete "${entry.item.name || '(unnamed)'}"?\n\nThis cannot be undone.`)) return;
+  STATE.data.trash.splice(idx, 1);
+  saveData();
+  renderTrashModal();
+  toast('Permanently deleted', 'success');
+}
+
+function emptyTrash() {
+  if (!STATE.data.trash || STATE.data.trash.length === 0) return;
+  const n = STATE.data.trash.length;
+  if (!confirm(`Permanently delete all ${n} items in the trash?\n\nThis cannot be undone.`)) return;
+  STATE.data.trash = [];
+  saveData();
+  renderTrashModal();
+  toast(`Emptied trash (${n} items)`, 'success');
+}
+
+function openTrashModal() {
+  renderTrashModal();
+}
+
+function renderTrashModal() {
+  const items = STATE.data.trash || [];
+  let body;
+  if (items.length === 0) {
+    body = `<div style="padding: 30px 12px; text-align:center; color: var(--text-faint);">Trash is empty.</div>`;
+  } else {
+    const cutoffMs = TRASH_DAYS * 24 * 60 * 60 * 1000;
+    body = items.map(t => {
+      const ageMs = Date.now() - new Date(t.deletedAt).getTime();
+      const daysLeft = Math.max(0, Math.ceil((cutoffMs - ageMs) / (24 * 60 * 60 * 1000)));
+      const kindIcon = t.kind === 'project' ? '📁' : t.kind === 'milestone' ? '◆' : '·';
+      const ctx = t.kind === 'milestone' ? `in ${escapeHtml(t.context.projectName || '?')}`
+                : t.kind === 'task'      ? `in ${escapeHtml((t.context.milestoneName || '?'))}`
+                : '';
+      return `
+        <div class="trash-item">
+          <div class="trash-item-icon">${kindIcon}</div>
+          <div class="trash-item-body">
+            <div class="trash-item-name">${escapeHtml(t.item.name || '(unnamed)')}</div>
+            <div class="trash-item-meta">
+              ${escapeHtml(t.kind)} ${ctx} · deleted ${escapeHtml(formatRelativeTime(t.deletedAt))}${t.deletedBy ? ' by ' + escapeHtml(t.deletedBy) : ''} · ${daysLeft}d left
+            </div>
+          </div>
+          <div class="trash-item-actions">
+            <button class="btn small primary" onclick="restoreFromTrash('${t.id}')">Restore</button>
+            <button class="btn small danger" onclick="permanentlyDeleteFromTrash('${t.id}')">Delete forever</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+  $('#modalRoot').innerHTML = `
+    <div class="modal-overlay">
+      <div class="modal modal-large">
+        <div class="modal-header">
+          <div class="modal-title">🗑 Trash <span style="color:var(--text-faint); font-size:12px; font-weight:400;">— ${items.length} item${items.length === 1 ? '' : 's'}, kept for ${TRASH_DAYS} days</span></div>
+          <button class="detail-close" onclick="closeModal()">×</button>
+        </div>
+        <div class="modal-body">
+          ${body}
+        </div>
+        <div class="modal-footer">
+          ${items.length > 0 ? '<button class="btn danger" onclick="emptyTrash()">Empty Trash</button>' : ''}
+          <button class="btn" onclick="closeModal()">Close</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function formatRelativeTime(iso) {
+  const t = new Date(iso).getTime();
+  const diff = Date.now() - t;
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+window.restoreFromTrash = restoreFromTrash;
+window.permanentlyDeleteFromTrash = permanentlyDeleteFromTrash;
+window.emptyTrash = emptyTrash;
+window.openTrashModal = openTrashModal;
 async function saveData() {
+  // Snapshot the "after" state of the most recent undo entry now that the
+  // change is committed.
+  finalizeUndoEntry();
   saveLocal();
   if (STATE.firebase) {
     try {
@@ -1378,6 +1772,7 @@ async function saveData() {
         statuses: STATE.data.statuses,
         categories: STATE.data.categories,
         projects: STATE.data.projects,
+        trash: STATE.data.trash || [],
         _writer: STATE._writerId,
         _updated: new Date().toISOString()
       });
@@ -2094,6 +2489,22 @@ function renderAll() {
   else if (STATE.view === 'workload') renderWorkload();
   renderDetailPanel();
   refreshCurrentUserBadge();
+  refreshUndoRedoButtons();
+}
+
+function refreshUndoRedoButtons() {
+  const undoBtn = $('#undoBtn');
+  const redoBtn = $('#redoBtn');
+  if (undoBtn) {
+    const top = STATE.undoStack[STATE.undoStack.length - 1];
+    undoBtn.disabled = !top;
+    undoBtn.title = top ? `Undo: ${top.label} (Cmd/Ctrl+Z)` : 'Nothing to undo (Cmd/Ctrl+Z)';
+  }
+  if (redoBtn) {
+    const top = STATE.redoStack[STATE.redoStack.length - 1];
+    redoBtn.disabled = !top;
+    redoBtn.title = top ? `Redo: ${top.label} (Cmd/Ctrl+Shift+Z)` : 'Nothing to redo (Cmd/Ctrl+Shift+Z)';
+  }
 }
 
 function refreshCurrentUserBadge() {
@@ -2928,8 +3339,9 @@ function attachGanttEvents() {
     });
   });
 
-  // Inline delete buttons on each row. Always confirm before deleting because
-  // there's no undo for milestones/tasks/projects.
+  // Inline delete buttons on each row. Items are moved to the Trash (where
+  // they live for 30 days and can be restored) rather than being permanently
+  // erased, and Cmd/Ctrl+Z immediately undoes the deletion.
   $$('[data-delete]').forEach(el => {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -2943,43 +3355,52 @@ function attachGanttEvents() {
         const milestoneCount = (p.milestones || []).length;
         const taskCount = (p.milestones || []).reduce((n, m) => n + (m.tasks || []).length, 0);
         const detail = milestoneCount > 0
-          ? ` This will also delete ${milestoneCount} milestone${milestoneCount === 1 ? '' : 's'}${taskCount > 0 ? ` and ${taskCount} task${taskCount === 1 ? '' : 's'}` : ''}.`
+          ? ` Includes ${milestoneCount} milestone${milestoneCount === 1 ? '' : 's'}${taskCount > 0 ? ` and ${taskCount} task${taskCount === 1 ? '' : 's'}` : ''}.`
           : '';
-        if (!confirm(`Delete project "${p.name}"?${detail}\n\nThis cannot be undone.`)) return;
+        if (!confirm(`Move "${p.name}" to Trash?${detail}\n\nIt can be restored from Settings → Trash for ${TRASH_DAYS} days.`)) return;
+        // Capture both the projects list (for the deletion) and trash (for
+        // the addition) so a single Undo reverses the whole move-to-trash.
+        captureUndo(`delete project "${p.name}"`, { type: 'projectsList' });
+        moveToTrash('project', p, { projectId: p.id, projectName: p.name });
         const idx = STATE.data.projects.findIndex(x => x.id === projectId);
         if (idx >= 0) STATE.data.projects.splice(idx, 1);
         if (STATE.selectedItem?.projectId === projectId) STATE.selectedItem = null;
         saveData();
         renderAll();
-        toast(`Deleted project "${p.name}"`, 'success');
+        toast(`Moved "${p.name}" to Trash. Cmd/Ctrl+Z to undo.`, 'success');
       } else if (what === 'milestone') {
         const p = getProject(projectId);
         const m = getMilestone(projectId, milestoneId);
         if (!p || !m) return;
         const taskCount = (m.tasks || []).length;
-        const detail = taskCount > 0 ? ` This will also delete ${taskCount} task${taskCount === 1 ? '' : 's'}.` : '';
-        if (!confirm(`Delete milestone "${m.name}"?${detail}\n\nThis cannot be undone.`)) return;
+        const detail = taskCount > 0 ? ` Includes ${taskCount} task${taskCount === 1 ? '' : 's'}.` : '';
+        if (!confirm(`Move milestone "${m.name}" to Trash?${detail}\n\nIt can be restored for ${TRASH_DAYS} days.`)) return;
+        captureUndo(`delete milestone "${m.name}"`, { type: 'milestonesList', projectId: p.id });
+        moveToTrash('milestone', m, { projectId: p.id, projectName: p.name, milestoneId: m.id, milestoneName: m.name });
         const idx = (p.milestones || []).findIndex(x => x.id === milestoneId);
         if (idx >= 0) p.milestones.splice(idx, 1);
         logHistory(projectId, `Deleted milestone "${m.name}"`);
         if (STATE.selectedItem?.milestoneId === milestoneId) STATE.selectedItem = null;
         saveData();
         renderAll();
-        toast(`Deleted milestone "${m.name}"`, 'success');
+        toast(`Moved "${m.name}" to Trash. Cmd/Ctrl+Z to undo.`, 'success');
       } else if (what === 'task') {
+        const p = getProject(projectId);
         const m = getMilestone(projectId, milestoneId);
         if (!m) return;
         const t = (m.tasks || []).find(x => x.id === taskId);
         if (!t) return;
         const label = t.name || '(unnamed task)';
-        if (!confirm(`Delete task "${label}"?\n\nThis cannot be undone.`)) return;
+        if (!confirm(`Move task "${label}" to Trash?\n\nIt can be restored for ${TRASH_DAYS} days.`)) return;
+        captureUndo(`delete task "${label}"`, { type: 'tasksList', projectId: p?.id, milestoneId: m.id });
+        moveToTrash('task', t, { projectId: p?.id, projectName: p?.name, milestoneId: m.id, milestoneName: m.name });
         const idx = (m.tasks || []).findIndex(x => x.id === taskId);
         if (idx >= 0) m.tasks.splice(idx, 1);
         logHistory(projectId, `Deleted task "${label}" from "${m.name}"`);
         if (STATE.selectedItem?.taskId === taskId) STATE.selectedItem = null;
         saveData();
         renderAll();
-        toast(`Deleted task "${label}"`, 'success');
+        toast(`Moved "${label}" to Trash. Cmd/Ctrl+Z to undo.`, 'success');
       }
     });
   });
@@ -3643,6 +4064,7 @@ function openDueDatePopup(anchor, projectId, milestoneId) {
     const old = cur || '(none)';
     const next = newVal || '';
     if (next === cur) { closePopup(); return; }
+    captureUndo(`change due date for "${m.name}"`, { type: 'milestone', projectId, id: milestoneId });
     m.dueDate = next;
     logHistory(projectId, `"${m.name}" due date: ${old} → ${next || '(none)'}`);
     saveData();
@@ -3761,6 +4183,11 @@ function openRenameInline(anchor, projectId, milestoneId, taskId) {
       cleanup();
       return;
     }
+    let undoTarget;
+    if (kind === 'project')   undoTarget = { type: 'project',   id: projectId };
+    else if (kind === 'milestone') undoTarget = { type: 'milestone', projectId, id: milestoneId };
+    else if (kind === 'task') undoTarget = { type: 'task', projectId, milestoneId, id: taskId };
+    captureUndo(`rename ${kind}`, undoTarget);
     target.name = newName;
     logHistory(projectId, `Renamed ${kind}: "${oldName}" → "${newName}"`);
     saveData();
@@ -5189,9 +5616,14 @@ function scrollWorkloadToToday() {
 
 /* ============== MODALS ============== */
 function openNewProjectModal() {
-  const mgrOpts = '<option value="">— None —</option>' + STATE.data.engineers.map(e =>
-    `<option value="${e.id}" ${STATE.data.currentUserId === e.id ? 'selected' : ''}>${escapeHtml(e.name)} (${e.role})</option>`
-  ).join('');
+  const me = STATE.data.currentUserId ? getEngineer(STATE.data.currentUserId) : null;
+  const meDisplay = me
+    ? `<div style="display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--panel-2); border:1px solid var(--border-strong); border-radius:4px;">
+         <span class="eng-dot" style="background:${me.color}"></span>
+         <span style="flex:1;">${escapeHtml(me.name)}</span>
+         <span style="font-size:10px; color:var(--text-faint); text-transform:uppercase;">${escapeHtml(me.role)}</span>
+       </div>`
+    : '<span style="color:var(--danger,#c97a6e);">Not identified — set yourself in the top-right badge</span>';
 
   $('#modalRoot').innerHTML = `
     <div class="modal-overlay">
@@ -5216,9 +5648,9 @@ function openNewProjectModal() {
             <input class="field-input" type="text" id="newProjClient" placeholder="e.g., DSA · ABC Hospital" />
           </div>
           <div class="field-group">
-            <label class="field-label">Manager (project owner)</label>
-            <select class="field-input" id="newProjManager">${mgrOpts}</select>
-            <div style="font-size:10px; color:var(--text-faint); margin-top:4px;">Defaults to "you" if set in Settings.</div>
+            <label class="field-label">Manager (you, as creator)</label>
+            ${meDisplay}
+            <div style="font-size:10px; color:var(--text-faint); margin-top:4px;">The creator is automatically the project manager. Reassignment can be done later in the project's detail panel.</div>
           </div>
         </div>
         <div class="modal-footer">
@@ -5232,11 +5664,16 @@ function openNewProjectModal() {
 }
 
 function createProject() {
+  // Re-check permission in case the modal was opened via some other path.
+  if (!canCreateProject(true)) { closeModal(); return; }
   const name = $('#newProjName').value.trim();
   if (!name) { toast('Name required', 'error'); return; }
   const number = $('#newProjNumber').value.trim();
   const client = $('#newProjClient').value.trim();
-  const managerId = $('#newProjManager').value;
+  // The creator is always the project manager — owners are inseparable from
+  // creation per the team's policy. The Manager field in the modal is shown
+  // for clarity but cannot deviate from the current user.
+  const managerId = STATE.data.currentUserId;
 
   const now = new Date().toISOString();
   const creator = STATE.data.currentUserId ? getEngineer(STATE.data.currentUserId) : null;
@@ -5520,6 +5957,7 @@ function openSettings() {
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
             <button class="btn small" onclick="exportJson()">↓ Export All (JSON)</button>
             <button class="btn small" onclick="importJsonClick()">↑ Import JSON</button>
+            <button class="btn small" onclick="closeModal(); openTrashModal();">🗑 Trash${(STATE.data.trash || []).length > 0 ? ` (${STATE.data.trash.length})` : ''}</button>
             <button class="btn small" onclick="loadDemo()">Load Demo Data</button>
             <button class="btn danger small" onclick="clearAllData()">Clear All</button>
           </div>
@@ -6198,6 +6636,7 @@ async function init() {
   $('#showTasks').addEventListener('change', (e) => { STATE.showTasks = e.target.checked; renderCalendar(); });
 
   $('#newProjectBtn').addEventListener('click', () => {
+    if (!canCreateProject(true)) return;
     if (!maybeConfirmDiscard()) return;
     discardEdits();
     openNewProjectModal();
@@ -6205,6 +6644,8 @@ async function init() {
   $('#settingsBtn').addEventListener('click', openSettings);
   $('#printBtn').addEventListener('click', openPrintDialog);
   $('#currentUserBadge').addEventListener('click', promptForUserIdentity);
+  $('#undoBtn').addEventListener('click', performUndo);
+  $('#redoBtn').addEventListener('click', performRedo);
   $('#importCsvBtn').addEventListener('click', openCsvImport);
   $('#exportIcsBtn').addEventListener('click', openIcsExport);
   $('#exportIcsBtn2').addEventListener('click', openIcsExport);
@@ -6317,6 +6758,15 @@ async function init() {
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       e.preventDefault();
       openQuickAddMilestone();
+    }
+    // Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z = redo. Skipped while user is in an
+    // input — there native undo handles the text edit.
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      e.preventDefault();
+      if (e.shiftKey) performRedo();
+      else performUndo();
     }
     // F2: rename the currently selected row in the Gantt side panel.
     if (e.key === 'F2') {
