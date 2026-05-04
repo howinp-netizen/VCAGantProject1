@@ -1284,11 +1284,30 @@ function saveLocal() {
   } catch(e) {}
 }
 
+// Default Firebase config — baked into the deployed app so every user is
+// auto-connected to the same Firestore without manual setup. A user can still
+// override this in Settings (the override is stored in localStorage under
+// FB_CONFIG_KEY); useful for testing against a separate database.
+const DEFAULT_FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAlcGU9KXJdngfZBsxmRkn4WZxVBfufl5k",
+  authDomain: "vca-schedule.firebaseapp.com",
+  projectId: "vca-schedule",
+  storageBucket: "vca-schedule.firebasestorage.app",
+  messagingSenderId: "477742606123",
+  appId: "1:477742606123:web:fcd4ffb8a28e067cf5076e",
+};
+
 async function initFirebase() {
+  // Override (per-browser, set via Settings) wins; otherwise use the baked-in
+  // default. This means new users get cloud sync the moment they open the URL.
   const cfgRaw = localStorage.getItem(FB_CONFIG_KEY);
-  if (!cfgRaw) return false;
+  let cfg;
+  if (cfgRaw) {
+    try { cfg = JSON.parse(cfgRaw); } catch (e) { cfg = null; }
+  }
+  if (!cfg) cfg = DEFAULT_FIREBASE_CONFIG;
+  if (!cfg || !cfg.projectId) return false;
   try {
-    const cfg = JSON.parse(cfgRaw);
     if (!window.__firebaseLib) {
       await new Promise(r => setTimeout(r, 600));
       if (!window.__firebaseLib) throw new Error('Firebase lib not loaded');
@@ -2150,11 +2169,9 @@ function renderGantt() {
     wrap.innerHTML = `
       <div class="empty-state">
         <h2>No projects yet</h2>
-        <p>Get started by adding your first project, or import from CSV.</p>
+        <p>Add your first project to start scheduling.</p>
         <div style="display:flex; gap:8px;">
           <button class="btn primary" onclick="document.getElementById('newProjectBtn').click()">+ New Project</button>
-          <button class="btn" onclick="document.getElementById('importCsvBtn').click()">↑ Import CSV</button>
-          <button class="btn" onclick="loadDemo()">Load Demo Data</button>
         </div>
       </div>`;
     return;
@@ -5438,21 +5455,38 @@ function openSettings() {
           </div>
 
           <div class="section-title">Cloud Sync (Firebase)</div>
-          <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">
-            ${isCloudConnected
-              ? '☁ Connected. All changes sync across users with the same config.'
-              : 'Currently using local storage only. Paste your Firebase config to enable cloud sync.'}
-          </div>
-          <textarea id="fbConfigInput" rows="6" style="width:100%; font-family:monospace; font-size:11px;" placeholder='{
+          ${(() => {
+            const usingOverride = !!fbCfg;
+            let statusLine, projectLine;
+            if (isCloudConnected) {
+              const cfgInUse = usingOverride ? JSON.parse(fbCfg) : DEFAULT_FIREBASE_CONFIG;
+              statusLine = '<span style="color:var(--accent);">☁ Connected — all changes sync to all VCA users.</span>';
+              projectLine = `Project: <code style="color:var(--text);">${escapeHtml(cfgInUse.projectId || '?')}</code>${usingOverride ? ' <span style="color:var(--text-faint);">(custom override)</span>' : ' <span style="color:var(--text-faint);">(default — built into the app)</span>'}`;
+            } else {
+              statusLine = '<span style="color:var(--danger,#c97a6e);">⚠ Not connected.</span> Cloud sync should auto-start on page load. If it does not, check your network or paste a config below.';
+              projectLine = '';
+            }
+            return `<div style="font-size:11px; color:var(--text-dim); margin-bottom:6px;">${statusLine}</div>
+                    ${projectLine ? `<div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">${projectLine}</div>` : ''}`;
+          })()}
+          <details style="margin-bottom: 8px;">
+            <summary style="font-size:11px; color:var(--text-faint); cursor:pointer; user-select:none;">Advanced — connect to a different Firebase project</summary>
+            <div style="margin-top:8px;">
+              <div style="font-size:10px; color:var(--text-faint); margin-bottom:4px;">
+                Most VCA users should leave this empty. Use only if you want this browser to sync to a different Firebase project (e.g. for testing).
+              </div>
+              <textarea id="fbConfigInput" rows="6" style="width:100%; font-family:monospace; font-size:11px;" placeholder='{
   "apiKey": "...",
   "authDomain": "...",
   "projectId": "...",
   ...
 }'>${fbCfg || ''}</textarea>
-          <div style="margin-top:8px; display:flex; gap:8px;">
-            <button class="btn primary small" onclick="saveFirebaseConfig()">Save & Connect</button>
-            ${isCloudConnected ? '<button class="btn danger small" onclick="disconnectFirebase()">Disconnect</button>' : ''}
-          </div>
+              <div style="margin-top:8px; display:flex; gap:8px;">
+                <button class="btn primary small" onclick="saveFirebaseConfig()">Save Override & Connect</button>
+                ${fbCfg ? '<button class="btn danger small" onclick="disconnectFirebase()">Clear Override (use default)</button>' : ''}
+              </div>
+            </div>
+          </details>
 
           <div class="section-title">Data</div>
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
