@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>VCA Schedule</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%231a1410'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' font-weight='600' fill='%23d4a574' text-anchor='middle'%3EV%3C/text%3E%3C/svg%3E" />
 
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
@@ -1321,11 +1322,38 @@ async function initFirebase() {
       if (snap.exists()) {
         const d = snap.data();
         if (d._writer === STATE._writerId) return;
-        STATE.data.engineers = d.engineers || [];
+        let cloudEngineers = Array.isArray(d.engineers) ? d.engineers : [];
+
+        // Defensive recovery: if cloud engineers list is empty or missing
+        // members of the default VCA team, merge them back in. This guards
+        // against accidental wipes (e.g. someone clears their roster locally
+        // and that empty state syncs out). Custom engineers added by users
+        // are preserved.
+        const VCA_TEAM = [
+          { id: 'e_aq',  name: 'Alex Quinonez',  role: 'engineer', color: ENG_COLORS[0] },
+          { id: 'e_np',  name: 'Noah Park',      role: 'engineer', color: ENG_COLORS[1] },
+          { id: 'e_ja',  name: 'Jungwon Ahn',    role: 'engineer', color: ENG_COLORS[2] },
+          { id: 'e_mk',  name: 'Minsun Ku',      role: 'engineer', color: ENG_COLORS[3] },
+          { id: 'e_bj',  name: 'Billy Jimenez',  role: 'engineer', color: ENG_COLORS[4] },
+          { id: 'e_db',  name: 'Dohyun Bak',     role: 'engineer', color: ENG_COLORS[5] },
+          { id: 'e_an',  name: 'Alex Nahmgoong', role: 'drafter',  color: ENG_COLORS[6] },
+          { id: 'e_amy', name: 'Amy Jang',       role: 'drafter',  color: ENG_COLORS[7] },
+        ];
+        const existing = new Set(cloudEngineers.map(e => e.id));
+        let added = false;
+        for (const m of VCA_TEAM) {
+          if (!existing.has(m.id)) { cloudEngineers.push(m); added = true; }
+        }
+
+        STATE.data.engineers = cloudEngineers;
         STATE.data.statuses  = d.statuses  || STATE.data.statuses;
         STATE.data.categories = d.categories || STATE.data.categories;
         STATE.data.projects  = d.projects  || [];
         renderAll();
+
+        // If we patched in missing VCA team members, push the patched roster
+        // back so other clients converge to the same restored state.
+        if (added) saveData();
       }
     });
     $('#syncStatus').textContent = '☁ Cloud';
