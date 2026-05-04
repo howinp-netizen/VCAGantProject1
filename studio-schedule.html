@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Studio Schedule</title>
+<title>VCA Schedule</title>
 
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
@@ -288,6 +288,35 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 }
 .editable-cell:hover { background: var(--accent-soft); outline: 1px solid var(--accent); }
 .editable-empty { color: var(--text-faint); font-style: italic; font-size: 10px; }
+
+/* User identity picker — first-launch modal that asks who's using this browser */
+.user-pick-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;
+}
+.user-pick-card {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border: 1px solid var(--border-strong);
+  background: var(--panel-2); color: var(--text);
+  border-radius: 4px; cursor: pointer; text-align: left;
+  font-family: inherit; font-size: 13px;
+  transition: background 0.1s, border-color 0.1s;
+}
+.user-pick-card:hover {
+  background: var(--accent-soft); border-color: var(--accent);
+}
+
+/* Current-user badge in the topbar — shows who's identified for this browser */
+.current-user-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 14px;
+  background: var(--panel-2); border: 1px solid var(--border-strong);
+  color: var(--text-dim); font-family: inherit; cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.current-user-badge:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.current-user-badge.unset { color: var(--danger, #c97a6e); border-color: var(--danger, #c97a6e); }
+.current-user-badge.unset:hover { background: rgba(201,122,110,0.15); }
+.current-user-badge .eng-dot { width: 10px; height: 10px; flex-shrink: 0; }
 
 .popup-menu {
   position: fixed; background: var(--panel); border: 1px solid var(--border-strong);
@@ -902,7 +931,7 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 <body>
 
 <div class="topbar">
-  <div class="brand">Studio<span class="accent">·</span>Schedule</div>
+  <div class="brand">VCA<span class="accent">·</span>Schedule</div>
   <div class="tabs">
     <button class="tab active" data-view="gantt">Gantt</button>
     <button class="tab" data-view="calendar">Calendar</button>
@@ -914,7 +943,12 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
     <div class="search-results" id="searchResults"></div>
   </div>
   <div class="topbar-right">
+    <button class="current-user-badge" id="currentUserBadge" title="Click to change who you are">
+      <span class="eng-dot" id="currentUserDot"></span>
+      <span id="currentUserName" style="font-size: 11px;">Not set</span>
+    </button>
     <span id="syncStatus" style="color: var(--text-faint); font-size: 11px;">Local</span>
+    <button class="btn" id="printBtn" title="Print Gantt chart">🖨 Print</button>
     <button class="btn" id="settingsBtn">⚙ Settings</button>
     <button class="btn primary" id="newProjectBtn">+ New Project</button>
   </div>
@@ -928,7 +962,7 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
         <option value="engineer">Engineer</option>
         <option value="status">Status</option>
         <option value="urgency">Urgency</option>
-        <option value="category">Category</option>
+        <option value="category">Phase/Type</option>
       </select>
     </div>
     <div class="divider"></div>
@@ -1002,10 +1036,9 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
       <button class="btn small quick-filter" id="qfMine" title="Projects I manage">⚑ My Projects</button>
       <button class="btn small quick-filter" id="qfMyWork" title="Milestones assigned to me">◆ My Milestones</button>
       <button class="btn small quick-filter" id="qfActive" title="Hide completed">▶ Active Only</button>
-      <button class="btn small" id="qfCategory" title="Filter by category">⊕ Category</button>
+      <button class="btn small" id="qfCategory" title="Filter by phase/type">⊕ Phase/Type</button>
       <button class="btn small" id="qfClient" title="Filter by client">⊕ Client</button>
       <button class="btn small" id="qfManager" title="Filter by project manager (owner)">⊕ Project Manager</button>
-      <button class="btn small" id="qfEngineer" title="Filter by assigned team member">⊕ Manager</button>
       <button class="btn small" id="qfVisibility" title="Filter by visibility (shared / engineers / private)">⊕ Visibility</button>
     </div>
     <span class="filter-separator" id="filterSeparator" title="Click to collapse/expand · drag to reorder"></span>
@@ -1038,7 +1071,6 @@ const STATE = {
     statuses: [
       { id: 'st_notstarted', name: 'Not Started', color: '#5a6573', isCompleted: false, isActive: false },
       { id: 'st_inprogress', name: 'In Progress', color: '#6b9bd1', isCompleted: false, isActive: true },
-      { id: 'st_review',     name: 'Under Review', color: '#d49e3a', isCompleted: false, isActive: true },
       { id: 'st_complete',   name: 'Complete',    color: '#5fa978', isCompleted: true,  isActive: false },
       { id: 'st_onhold',     name: 'On Hold',     color: '#c97a6e', isCompleted: false, isActive: false },
     ],
@@ -1046,7 +1078,7 @@ const STATE = {
       { id: 'cat_sd', name: 'SD', color: '#6b9bd1' },
       { id: 'cat_dd', name: 'DD', color: '#8aa86a' },
       { id: 'cat_cd', name: 'CD', color: '#b888c4' },
-      { id: 'cat_dsa', name: 'DSA Backcheck', color: '#d49e3a' },
+      { id: 'cat_dsa', name: 'AHJ Plancheck', color: '#d49e3a' },
     ],
     projects: [],
     currentUserId: null,  // for "created by"
@@ -1070,7 +1102,7 @@ const STATE = {
     client:  { visible: true,  width: 130, label: 'Client',     required: false },
     mgr:     { visible: true,  width: 130, label: 'Manager',    required: false },
     assign:  { visible: true,  width: 130, label: 'Assignees',  required: false },
-    cat:     { visible: true,  width: 110, label: 'Category',   required: false },
+    cat:     { visible: true,  width: 110, label: 'Phase/Type',   required: false },
     due:     { visible: true,  width: 80,  label: 'Due',        required: false },
     status:  { visible: true,  width: 110, label: 'Status',     required: false },
   },
@@ -1080,6 +1112,10 @@ const STATE = {
   /* Project sort key: 'manual' (data order), 'name', 'number',
      'soonest_due' (earliest non-completed milestone), 'manager', 'client', 'newest', 'oldest'. */
   projectSort: 'manual',
+  // Extra timeline padding (days). Auto-grows as user scrolls past edges so
+  // they can pan indefinitely back in time or forward into the future.
+  timelineExtraLeft: 0,
+  timelineExtraRight: 0,
 };
 
 const ENG_COLORS = ['#6b9bd1','#c97a6e','#8aa86a','#b888c4','#d4a574','#5fa9a0','#c98c5a','#9696c4','#7ba89e','#c46f8f'];
@@ -1166,15 +1202,70 @@ function loadLocal() {
     // current user: identifies "me" for created-by; can be set in Settings
     STATE.data.currentUserId = localStorage.getItem(CURRENT_USER_KEY) || null;
 
-    // Seed three default engineers (A, B, C) on first load so the user has
-    // someone to assign as Manager / Assignee right away. Skipped if any
-    // engineers are already present (loaded from localStorage or otherwise).
+    // Seed default VCA team on first load. Skipped if any engineers are
+    // already present (loaded from localStorage or otherwise). Also auto-adds
+    // any of these team members who are missing from an existing roster, so
+    // legacy databases pick up new hires without overwriting the user's
+    // customizations.
+    const VCA_TEAM = [
+      { id: 'e_aq', name: 'Alex Quinonez',  role: 'engineer', color: ENG_COLORS[0] },
+      { id: 'e_np', name: 'Noah Park',      role: 'engineer', color: ENG_COLORS[1] },
+      { id: 'e_ja', name: 'Jungwon Ahn',    role: 'engineer', color: ENG_COLORS[2] },
+      { id: 'e_mk', name: 'Minsun Ku',      role: 'engineer', color: ENG_COLORS[3] },
+      { id: 'e_bj', name: 'Billy Jimenez',  role: 'engineer', color: ENG_COLORS[4] },
+      { id: 'e_db', name: 'Dohyun Bak',     role: 'engineer', color: ENG_COLORS[5] },
+      { id: 'e_an', name: 'Alex Nahmgoong', role: 'drafter',  color: ENG_COLORS[6] },
+      { id: 'e_amy',name: 'Amy Jang',       role: 'drafter',  color: ENG_COLORS[7] },
+    ];
     if (!STATE.data.engineers || STATE.data.engineers.length === 0) {
-      STATE.data.engineers = [
-        { id: 'e_a', name: 'A', role: 'engineer', color: ENG_COLORS[0] },
-        { id: 'e_b', name: 'B', role: 'engineer', color: ENG_COLORS[1] },
-        { id: 'e_c', name: 'C', role: 'engineer', color: ENG_COLORS[2] },
-      ];
+      STATE.data.engineers = VCA_TEAM.slice();
+    } else {
+      // Add any missing default team members without disturbing existing ones
+      const existing = new Set(STATE.data.engineers.map(e => e.id));
+      for (const m of VCA_TEAM) {
+        if (!existing.has(m.id)) STATE.data.engineers.push(m);
+      }
+      // Remove the old placeholder A/B/C engineers if present, but only if
+      // they're not referenced anywhere — preserves data integrity for users
+      // who may have assigned real work to them.
+      const placeholderIds = ['e_a', 'e_b', 'e_c'];
+      for (const pid of placeholderIds) {
+        const used =
+          (STATE.data.projects || []).some(p =>
+            p.managerId === pid ||
+            (p.milestones || []).some(m =>
+              (m.assigneeIds || []).includes(pid) ||
+              (m.tasks || []).some(t => t.assigneeId === pid)
+            )
+          ) || STATE.data.currentUserId === pid;
+        if (!used) {
+          const idx = STATE.data.engineers.findIndex(e => e.id === pid);
+          if (idx >= 0) STATE.data.engineers.splice(idx, 1);
+        }
+      }
+    }
+    // Migrate older category name "DSA Backcheck" → "AHJ Plancheck" so users
+    // who set this up before the rename continue to see the right label. Only
+    // touches the 'cat_dsa' id; custom categories users added are left alone.
+    for (const c of (STATE.data.categories || [])) {
+      if (c.id === 'cat_dsa' && (c.name === 'DSA Backcheck' || c.name === 'DSA backcheck')) {
+        c.name = 'AHJ Plancheck';
+      }
+    }
+    // Migrate older "Under Review" status → removed (rule #5). Re-map any
+    // milestones that referenced it to "In Progress".
+    const reviewIdx = (STATE.data.statuses || []).findIndex(s => s.id === 'st_review');
+    if (reviewIdx >= 0) {
+      STATE.data.statuses.splice(reviewIdx, 1);
+      for (const p of (STATE.data.projects || [])) {
+        if (p.statusId === 'st_review') p.statusId = 'st_inprogress';
+        for (const m of (p.milestones || [])) {
+          if (m.statusId === 'st_review') m.statusId = 'st_inprogress';
+          for (const t of (m.tasks || [])) {
+            if (t.statusId === 'st_review') t.statusId = 'st_inprogress';
+          }
+        }
+      }
     }
   } catch(e) { console.error(e); }
 }
@@ -1193,11 +1284,30 @@ function saveLocal() {
   } catch(e) {}
 }
 
+// Default Firebase config — baked into the deployed app so every user is
+// auto-connected to the same Firestore without manual setup. A user can still
+// override this in Settings (the override is stored in localStorage under
+// FB_CONFIG_KEY); useful for testing against a separate database.
+const DEFAULT_FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAlcGU9KXJdngfZBsxmRkn4WZxVBfufl5k",
+  authDomain: "vca-schedule.firebaseapp.com",
+  projectId: "vca-schedule",
+  storageBucket: "vca-schedule.firebasestorage.app",
+  messagingSenderId: "477742606123",
+  appId: "1:477742606123:web:fcd4ffb8a28e067cf5076e",
+};
+
 async function initFirebase() {
+  // Override (per-browser, set via Settings) wins; otherwise use the baked-in
+  // default. This means new users get cloud sync the moment they open the URL.
   const cfgRaw = localStorage.getItem(FB_CONFIG_KEY);
-  if (!cfgRaw) return false;
+  let cfg;
+  if (cfgRaw) {
+    try { cfg = JSON.parse(cfgRaw); } catch (e) { cfg = null; }
+  }
+  if (!cfg) cfg = DEFAULT_FIREBASE_CONFIG;
+  if (!cfg || !cfg.projectId) return false;
   try {
-    const cfg = JSON.parse(cfgRaw);
     if (!window.__firebaseLib) {
       await new Promise(r => setTimeout(r, 600));
       if (!window.__firebaseLib) throw new Error('Firebase lib not loaded');
@@ -1293,6 +1403,9 @@ function getProjectDateRange(p) {
   return { min, max };
 }
 
+// Extra days to add at the timeline's left/right edges. The user can extend
+// these by scrolling past the current edge (auto-extends) or with the ⇤/⇥
+// nudge buttons. We keep them on STATE so they persist for the session.
 function getOverallDateRange() {
   let min = null, max = null;
   for (const p of STATE.data.projects) {
@@ -1304,8 +1417,8 @@ function getOverallDateRange() {
   const t = today();
   if (!min || min > t) min = addDays(t, -7);
   if (!max || max < t) max = addDays(t, 30);
-  min = addDays(min, -7);
-  max = addDays(max, 21);
+  min = addDays(min, -7 - (STATE.timelineExtraLeft || 0));
+  max = addDays(max, 21 + (STATE.timelineExtraRight || 0));
   // align min to Monday
   const dow = min.getDay();
   const offset = dow === 0 ? -6 : 1 - dow;
@@ -1374,7 +1487,7 @@ const FILTER_TYPES = {
   engineer: { label: 'Manager', getOptions: () =>
     STATE.data.engineers.map(e => ({ value: e.id, label: `${e.name} (${e.role})` }))
   },
-  category: { label: 'Category', getOptions: () =>
+  category: { label: 'Phase/Type', getOptions: () =>
     STATE.data.categories.map(c => ({ value: c.id, label: c.name }))
   },
   client: { label: 'Client', getOptions: () => {
@@ -1572,7 +1685,6 @@ function renderFilterBar() {
   setBadge('#qfCategory', 'category');
   setBadge('#qfClient', 'client');
   setBadge('#qfManager', 'manager');
-  setBadge('#qfEngineer', 'engineer');
   setBadge('#qfVisibility', 'visibility');
 
   refreshSortButtonLabel();
@@ -1953,6 +2065,26 @@ function renderAll() {
   else if (STATE.view === 'mywork') renderMyWork();
   else if (STATE.view === 'workload') renderWorkload();
   renderDetailPanel();
+  refreshCurrentUserBadge();
+}
+
+function refreshCurrentUserBadge() {
+  const badge = $('#currentUserBadge');
+  const dot = $('#currentUserDot');
+  const name = $('#currentUserName');
+  if (!badge || !dot || !name) return;
+  const me = STATE.data.currentUserId ? getEngineer(STATE.data.currentUserId) : null;
+  if (me) {
+    badge.classList.remove('unset');
+    dot.style.background = me.color;
+    name.textContent = me.name;
+    badge.title = `Signed in as ${me.name} (${me.role}). Click to change.`;
+  } else {
+    badge.classList.add('unset');
+    dot.style.background = 'var(--text-faint)';
+    name.textContent = '⚠ Not identified — click to set';
+    badge.title = 'Click to identify yourself';
+  }
 }
 
 function setView(v) {
@@ -2037,11 +2169,9 @@ function renderGantt() {
     wrap.innerHTML = `
       <div class="empty-state">
         <h2>No projects yet</h2>
-        <p>Get started by adding your first project, or import from CSV.</p>
+        <p>Add your first project to start scheduling.</p>
         <div style="display:flex; gap:8px;">
           <button class="btn primary" onclick="document.getElementById('newProjectBtn').click()">+ New Project</button>
-          <button class="btn" onclick="document.getElementById('importCsvBtn').click()">↑ Import CSV</button>
-          <button class="btn" onclick="loadDemo()">Load Demo Data</button>
         </div>
       </div>`;
     return;
@@ -2111,6 +2241,10 @@ function renderGantt() {
     sideScroll.scrollTop = gridScroll.scrollTop;
     syncing = false;
     updateStickyMajorCells(gridScroll, sideWidth);
+    // Auto-extend the timeline when the user scrolls to either edge so they
+    // can pan back/forward indefinitely. Throttled so the re-render doesn't
+    // happen on every scroll event.
+    maybeExtendTimeline(gridScroll);
   });
   sideScroll.addEventListener('scroll', () => {
     if (syncing) return;
@@ -2125,6 +2259,36 @@ function renderGantt() {
   attachGanttEvents();
   attachSideResizer();
   attachDragHandlers(min, dayWidth);
+}
+
+// Extends the timeline by 90 days in either direction when the user reaches
+// the left or right edge of the Gantt grid. Re-renders so the new days are
+// drawn. When extending left, scrollLeft is adjusted to keep the user's
+// calendar position visually anchored.
+let _extendTimer = null;
+function maybeExtendTimeline(gridScroll) {
+  if (_extendTimer) return;
+  _extendTimer = setTimeout(() => {
+    _extendTimer = null;
+    if (!gridScroll || !gridScroll.isConnected) return;
+    const scrollLeft = gridScroll.scrollLeft;
+    const maxScroll = gridScroll.scrollWidth - gridScroll.clientWidth;
+    const EDGE = 80;
+    const EXTEND = 90;
+    if (scrollLeft <= EDGE) {
+      const dayWidth = pixelsPerDay();
+      STATE.timelineExtraLeft = (STATE.timelineExtraLeft || 0) + EXTEND;
+      const adj = EXTEND * dayWidth;
+      renderGantt();
+      const newGrid = $('#ganttGridScroll');
+      if (newGrid) newGrid.scrollLeft = scrollLeft + adj;
+    } else if (scrollLeft >= maxScroll - EDGE) {
+      STATE.timelineExtraRight = (STATE.timelineExtraRight || 0) + EXTEND;
+      renderGantt();
+      const newGrid = $('#ganttGridScroll');
+      if (newGrid) newGrid.scrollLeft = scrollLeft;
+    }
+  }, 150);
 }
 
 // Sticky behavior for major (month/year) header cells: when scrolling
@@ -2563,6 +2727,7 @@ function renderGanttSideRow(row) {
       ? `<span class="assign-text"><span class="eng-dot" style="background:${eng.color}"></span><span style="font-size:11px; color:${eng.color};">${escapeHtml(eng.name)}</span></span>`
       : `<span class="editable-empty">+ assign</span>`;
     const range = t.start && t.end ? `${formatShortDate(t.start)}–${formatShortDate(t.end)}` : '';
+    const tStatus = getStatus(t.statusId) || getStatus('st_notstarted');
 
     return `
       <div class="row">
@@ -2573,7 +2738,7 @@ function renderGanttSideRow(row) {
           ${wrap('assign', `<span class="editable-cell" data-edit-cell="t_assignee" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" title="Click to change assignee">${assignCell}</span>`)}
           ${wrap('cat', '')}
           ${wrap('due', `<span class="editable-cell" data-edit-cell="t_dates" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" title="Click to change task dates"><span class="due-text" style="font-size:10px;">${range}</span></span>`)}
-          ${wrap('status', '')}
+          ${wrap('status', `<span class="editable-cell" data-edit-cell="t_status" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" title="Click to change status"><span class="status-text" style="color:${tStatus.color}; font-size:10px;">${escapeHtml(tStatus.name)}</span></span>`)}
         </div>
       </div>`;
   }
@@ -2723,7 +2888,7 @@ function attachGanttEvents() {
         discardEdits();
         const m = getMilestone(projectId, milestoneId);
         if (!m) return;
-        const newT = { id: uid('t'), name: '', assigneeId: '', start: todayStr(), end: m.dueDate || todayStr() };
+        const newT = { id: uid('t'), name: '', assigneeId: '', start: todayStr(), end: m.dueDate || todayStr(), statusId: 'st_notstarted' };
         if (!m.tasks) m.tasks = [];
         m.tasks.push(newT);
         m.expanded = true;  // ensure the new task is visible
@@ -2807,6 +2972,7 @@ function attachGanttEvents() {
       else if (kind === 'progress') openProgressPopup(el, projectId, milestoneId);
       else if (kind === 'm_due') openDueDatePopup(el, projectId, milestoneId);
       else if (kind === 't_dates') openTaskDatesPopup(el, projectId, milestoneId, taskId);
+      else if (kind === 't_status') openTaskStatusPopup(el, projectId, milestoneId, taskId);
     });
   });
 
@@ -3299,6 +3465,38 @@ function openStatusPopup(anchor, projectId, milestoneId) {
   });
 }
 
+function openTaskStatusPopup(anchor, projectId, milestoneId, taskId) {
+  const m = getMilestone(projectId, milestoneId);
+  const t = m ? (m.tasks || []).find(x => x.id === taskId) : null;
+  if (!t) return;
+  const cur = t.statusId || 'st_notstarted';
+  let items = '';
+  for (const s of STATE.data.statuses) {
+    const sel = cur === s.id;
+    items += `<div class="popup-menu-item ${sel ? 'selected' : ''}" data-status-id="${s.id}">
+      <span class="popup-checkbox">${sel ? '✓' : ''}</span>
+      <span class="eng-dot" style="background:${s.color}"></span>
+      <span style="color:${s.color}">${escapeHtml(s.name)}</span>
+    </div>`;
+  }
+  const popup = showPopup(anchor, items);
+  popup.querySelectorAll('.popup-menu-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const newId = item.dataset.statusId;
+      if (cur === newId) { closePopup(); return; }
+      const oldS = getStatus(cur);
+      const newS = getStatus(newId);
+      t.statusId = newId;
+      logHistory(projectId, `Task "${t.name || '(unnamed)'}" status: ${oldS ? oldS.name : '?'} → ${newS.name}`);
+      saveData();
+      closePopup();
+      renderAll();
+      toast('Task status updated', 'success');
+    });
+  });
+}
+
 function openTaskAssigneePopup(anchor, projectId, milestoneId, taskId) {
   const t = getTask(projectId, milestoneId, taskId);
   const m = getMilestone(projectId, milestoneId);
@@ -3322,43 +3520,73 @@ function openProgressPopup(anchor, projectId, milestoneId) {
   const m = getMilestone(projectId, milestoneId);
   if (!m) return;
   const cur = (typeof m.progress === 'number') ? m.progress : 0;
-  const options = [0, 25, 50, 75, 100];
-  let items = options.map(v => {
-    const sel = cur === v;
-    return `<div class="popup-menu-item ${sel ? 'selected' : ''}" data-progress="${v}">
-      <span class="popup-checkbox">${sel ? '✓' : ''}</span>
-      <span style="display:inline-block; width:80px; height:6px; background:var(--border); border-radius:3px; overflow:hidden;">
-        <span style="display:block; width:${v}%; height:100%; background:var(--accent);"></span>
-      </span>
-      <span style="margin-left:8px; font-variant-numeric: tabular-nums; min-width: 36px;">${v}%</span>
-    </div>`;
-  }).join('');
-  const popup = showPopup(anchor, items);
-  popup.querySelectorAll('.popup-menu-item').forEach(item => {
-    item.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const newVal = parseInt(item.dataset.progress);
-      const oldVal = cur;
-      if (newVal === oldVal) { closePopup(); return; }
-      m.progress = newVal;
-      // If 100%, also auto-set status to first completed status
-      if (newVal === 100) {
-        const completed = STATE.data.statuses.find(s => s.isCompleted);
-        if (completed && m.statusId !== completed.id) {
-          const oldS = getStatus(m.statusId);
-          m.statusId = completed.id;
-          logHistory(projectId, `"${m.name}" progress: ${oldVal}% → 100% (status: ${oldS.name} → ${completed.name})`);
-        } else {
-          logHistory(projectId, `"${m.name}" progress: ${oldVal}% → ${newVal}%`);
-        }
+  const html = `
+    <div style="padding:10px 12px; min-width: 220px;">
+      <div style="font-size:11px; color:var(--accent); font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">
+        Progress %
+      </div>
+      <div style="display:flex; gap:6px; align-items:center; margin-bottom:8px;">
+        <input type="number" id="progInput" class="field-input" value="${cur}" min="0" max="100" step="1"
+               style="flex:1; text-align:right; font-variant-numeric: tabular-nums;" />
+        <span style="color:var(--text-faint); font-size:14px;">%</span>
+      </div>
+      <input type="range" id="progSlider" min="0" max="100" step="1" value="${cur}" style="width:100%; margin-bottom:8px;" accent-color="var(--accent)" />
+      <div style="display:flex; gap:4px; flex-wrap:wrap; margin-bottom:10px;">
+        ${[0, 25, 50, 75, 100].map(v => `<button type="button" class="btn small prog-quick" data-v="${v}" style="flex:1; min-width:0;">${v}%</button>`).join('')}
+      </div>
+      <div style="display:flex; gap:6px;">
+        <button class="btn small primary" id="progApply" style="flex:1;">Apply</button>
+        <button class="btn small" id="progCancel">Cancel</button>
+      </div>
+    </div>
+  `;
+  const popup = showPopup(anchor, html);
+  const input = popup.querySelector('#progInput');
+  const slider = popup.querySelector('#progSlider');
+  setTimeout(() => { input?.focus(); input?.select(); }, 30);
+
+  const sync = (val) => {
+    let v = parseInt(val);
+    if (isNaN(v)) v = 0;
+    v = Math.max(0, Math.min(100, v));
+    input.value = v;
+    slider.value = v;
+  };
+  input.addEventListener('input', () => sync(input.value));
+  slider.addEventListener('input', () => sync(slider.value));
+  popup.querySelectorAll('.prog-quick').forEach(b => {
+    b.addEventListener('click', (e) => { e.stopPropagation(); sync(b.dataset.v); });
+  });
+
+  const apply = () => {
+    let newVal = parseInt(input.value);
+    if (isNaN(newVal)) newVal = 0;
+    newVal = Math.max(0, Math.min(100, newVal));
+    if (newVal === cur) { closePopup(); return; }
+    m.progress = newVal;
+    // If 100%, auto-set status to first completed status
+    if (newVal === 100) {
+      const completed = STATE.data.statuses.find(s => s.isCompleted);
+      if (completed && m.statusId !== completed.id) {
+        const oldS = getStatus(m.statusId);
+        m.statusId = completed.id;
+        logHistory(projectId, `"${m.name}" progress: ${cur}% → 100% (status: ${oldS.name} → ${completed.name})`);
       } else {
-        logHistory(projectId, `"${m.name}" progress: ${oldVal}% → ${newVal}%`);
+        logHistory(projectId, `"${m.name}" progress: ${cur}% → ${newVal}%`);
       }
-      saveData();
-      closePopup();
-      renderAll();
-      toast(`Progress: ${newVal}%`, 'success');
-    });
+    } else {
+      logHistory(projectId, `"${m.name}" progress: ${cur}% → ${newVal}%`);
+    }
+    saveData();
+    closePopup();
+    renderAll();
+    toast(`Progress: ${newVal}%`, 'success');
+  };
+  popup.querySelector('#progApply').addEventListener('click', (e) => { e.stopPropagation(); apply(); });
+  popup.querySelector('#progCancel').addEventListener('click', (e) => { e.stopPropagation(); closePopup(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); apply(); }
+    if (e.key === 'Escape') { e.preventDefault(); closePopup(); }
   });
 }
 
@@ -3564,7 +3792,7 @@ function openQuickAddMilestone() {
           </div>
           <div class="field-row">
             <div class="field-group">
-              <label class="field-label">Category</label>
+              <label class="field-label">Phase/Type</label>
               <select class="field-input" id="qaCategory">${catOpts}</select>
             </div>
             <div class="field-group">
@@ -4034,7 +4262,7 @@ function renderMilestoneDetail(pid, mid) {
       </div>
       <div class="field-row">
         <div class="field-group">
-          <label class="field-label">Category</label>
+          <label class="field-label">Phase/Type</label>
           <select class="field-input" data-edit="categoryId">${catOpts}</select>
         </div>
         <div class="field-group">
@@ -4251,7 +4479,7 @@ function handleDetailAction(action, el) {
     if (!maybeConfirmDiscard()) return;
     discardEdits();
     const m = getMilestone(projectId, milestoneId);
-    const newT = { id: uid('t'), name: '', assigneeId: '', start: todayStr(), end: m.dueDate || todayStr() };
+    const newT = { id: uid('t'), name: '', assigneeId: '', start: todayStr(), end: m.dueDate || todayStr(), statusId: 'st_notstarted' };
     if (!m.tasks) m.tasks = [];
     m.tasks.push(newT);
     logHistory(projectId, `Added task to "${m.name}"`);
@@ -5009,6 +5237,124 @@ function createProject() {
 
 function closeModal() { $('#modalRoot').innerHTML = ''; }
 
+// Print dialog: pick paper size + which view, then print using a CSS @page rule.
+function openPrintDialog() {
+  const html = `
+    <div class="modal-content" style="max-width: 480px;">
+      <h2 style="margin-bottom: 16px;">Print Gantt Chart</h2>
+      <div class="field-group" style="margin-bottom: 14px;">
+        <label class="field-label">Paper Size</label>
+        <div style="display:flex; gap:8px;">
+          <label style="flex:1; display:flex; align-items:center; gap:6px; padding:10px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
+            <input type="radio" name="paperSize" value="letter" checked />
+            <div>
+              <div style="font-weight:600;">Letter</div>
+              <div style="font-size:10px; color:var(--text-faint);">8.5 × 11"</div>
+            </div>
+          </label>
+          <label style="flex:1; display:flex; align-items:center; gap:6px; padding:10px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
+            <input type="radio" name="paperSize" value="tabloid" />
+            <div>
+              <div style="font-weight:600;">Tabloid</div>
+              <div style="font-size:10px; color:var(--text-faint);">11 × 17"</div>
+            </div>
+          </label>
+        </div>
+      </div>
+      <div class="field-group" style="margin-bottom: 14px;">
+        <label class="field-label">Orientation</label>
+        <div style="display:flex; gap:8px;">
+          <label style="display:flex; align-items:center; gap:6px;"><input type="radio" name="orientation" value="landscape" checked /> Landscape (recommended)</label>
+          <label style="display:flex; align-items:center; gap:6px;"><input type="radio" name="orientation" value="portrait" /> Portrait</label>
+        </div>
+      </div>
+      <div class="field-group" style="margin-bottom: 16px;">
+        <label class="field-label">What to print</label>
+        <select class="field-input" id="printScope">
+          <option value="current">Current view (with current filters and zoom)</option>
+          <option value="all">All projects (light theme, full timeline)</option>
+        </select>
+      </div>
+      <div style="background: var(--panel-2); padding: 10px 12px; border-radius: 4px; font-size: 11px; color: var(--text-dim); margin-bottom: 16px;">
+        <strong style="color:var(--text);">Tip:</strong> In the browser's print dialog, choose the matching paper size and select <strong style="color:var(--text);">"Background graphics"</strong> in More settings so colors print correctly.
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end;">
+        <button class="btn" id="printCancel">Cancel</button>
+        <button class="btn primary" id="printGo">🖨 Open Print Dialog</button>
+      </div>
+    </div>
+  `;
+  showModal(html);
+  $('#printCancel').addEventListener('click', closeModal);
+  $('#printGo').addEventListener('click', () => {
+    const paper = document.querySelector('input[name="paperSize"]:checked').value;
+    const orient = document.querySelector('input[name="orientation"]:checked').value;
+    const scope = $('#printScope').value;
+    closeModal();
+    runPrint(paper, orient, scope);
+  });
+}
+
+function runPrint(paper, orient, scope) {
+  // Inject a temporary @page rule with the chosen size + orientation.
+  // Browsers honor the @page rule for the page size; users still confirm in
+  // the print dialog (and may need to enable "Background graphics" for colors).
+  const sizeMap = {
+    letter: '8.5in 11in',
+    tabloid: '11in 17in',
+  };
+  const dim = sizeMap[paper] || sizeMap.letter;
+  const styleEl = document.createElement('style');
+  styleEl.id = 'dynamicPrintStyle';
+  styleEl.textContent = `
+    @page { size: ${dim} ${orient}; margin: 0.5in; }
+    body.printing .topbar, body.printing .filter-bar, body.printing .toolbar,
+    body.printing .detail-panel, body.printing #modalRoot, body.printing #toastRoot,
+    body.printing #tooltipRoot, body.printing .row-add-btn, body.printing .row-delete-btn,
+    body.printing .rename-edit-icon, body.printing .col-resize-handle,
+    body.printing .side-resize-handle, body.printing .deadline-jumper,
+    body.printing .scroll-month-indicator { display: none !important; }
+    body.printing { background: white !important; color: black !important; }
+    body.printing .gantt-side-header,
+    body.printing .gantt-side-body,
+    body.printing .gantt-grid-wrap,
+    body.printing .gantt-timeline-header-wrap,
+    body.printing .gantt-body { overflow: visible !important; }
+    body.printing .row-side, body.printing .row-grid { background: white !important; color: black !important; }
+    body.printing .name-text, body.printing .due-text, body.printing .status-text,
+    body.printing .cat-text { color: black !important; }
+    body.printing .major-cell, body.printing .minor-cell {
+      background: white !important; color: black !important;
+      border-color: #999 !important;
+    }
+    body.printing .major-cell.current-month { background: #fff7e0 !important; }
+    body.printing .minor-cell.today { background: #fff7e0 !important; }
+    body.printing .bar { border: 1px solid #333 !important; }
+    body.printing .main, body.printing .gantt-body, body.printing #ganttView,
+    body.printing .gantt-side-body, body.printing .gantt-grid-wrap {
+      height: auto !important; max-height: none !important;
+    }
+    /* Make sure project end labels print readable */
+    body.printing .project-end-label { color: black !important; text-shadow: none !important; }
+    body.printing .proj-tag-num { background: #d4a574 !important; color: black !important; }
+    /* Print color adjustment */
+    * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  `;
+  document.head.appendChild(styleEl);
+  document.body.classList.add('printing');
+
+  // Give the layout a moment to settle, then trigger native print
+  setTimeout(() => {
+    window.print();
+    // Cleanup after print dialog closes
+    setTimeout(() => {
+      document.body.classList.remove('printing');
+      const s = document.getElementById('dynamicPrintStyle');
+      if (s) s.remove();
+    }, 500);
+  }, 100);
+}
+
 function openSettings() {
   if (!maybeConfirmDiscard()) return;
   discardEdits();
@@ -5109,21 +5455,38 @@ function openSettings() {
           </div>
 
           <div class="section-title">Cloud Sync (Firebase)</div>
-          <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">
-            ${isCloudConnected
-              ? '☁ Connected. All changes sync across users with the same config.'
-              : 'Currently using local storage only. Paste your Firebase config to enable cloud sync.'}
-          </div>
-          <textarea id="fbConfigInput" rows="6" style="width:100%; font-family:monospace; font-size:11px;" placeholder='{
+          ${(() => {
+            const usingOverride = !!fbCfg;
+            let statusLine, projectLine;
+            if (isCloudConnected) {
+              const cfgInUse = usingOverride ? JSON.parse(fbCfg) : DEFAULT_FIREBASE_CONFIG;
+              statusLine = '<span style="color:var(--accent);">☁ Connected — all changes sync to all VCA users.</span>';
+              projectLine = `Project: <code style="color:var(--text);">${escapeHtml(cfgInUse.projectId || '?')}</code>${usingOverride ? ' <span style="color:var(--text-faint);">(custom override)</span>' : ' <span style="color:var(--text-faint);">(default — built into the app)</span>'}`;
+            } else {
+              statusLine = '<span style="color:var(--danger,#c97a6e);">⚠ Not connected.</span> Cloud sync should auto-start on page load. If it does not, check your network or paste a config below.';
+              projectLine = '';
+            }
+            return `<div style="font-size:11px; color:var(--text-dim); margin-bottom:6px;">${statusLine}</div>
+                    ${projectLine ? `<div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">${projectLine}</div>` : ''}`;
+          })()}
+          <details style="margin-bottom: 8px;">
+            <summary style="font-size:11px; color:var(--text-faint); cursor:pointer; user-select:none;">Advanced — connect to a different Firebase project</summary>
+            <div style="margin-top:8px;">
+              <div style="font-size:10px; color:var(--text-faint); margin-bottom:4px;">
+                Most VCA users should leave this empty. Use only if you want this browser to sync to a different Firebase project (e.g. for testing).
+              </div>
+              <textarea id="fbConfigInput" rows="6" style="width:100%; font-family:monospace; font-size:11px;" placeholder='{
   "apiKey": "...",
   "authDomain": "...",
   "projectId": "...",
   ...
 }'>${fbCfg || ''}</textarea>
-          <div style="margin-top:8px; display:flex; gap:8px;">
-            <button class="btn primary small" onclick="saveFirebaseConfig()">Save & Connect</button>
-            ${isCloudConnected ? '<button class="btn danger small" onclick="disconnectFirebase()">Disconnect</button>' : ''}
-          </div>
+              <div style="margin-top:8px; display:flex; gap:8px;">
+                <button class="btn primary small" onclick="saveFirebaseConfig()">Save Override & Connect</button>
+                ${fbCfg ? '<button class="btn danger small" onclick="disconnectFirebase()">Clear Override (use default)</button>' : ''}
+              </div>
+            </div>
+          </details>
 
           <div class="section-title">Data</div>
           <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -5302,7 +5665,7 @@ function exportJson() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `studio-schedule-${todayStr()}.json`;
+  a.download = `vca-schedule-${todayStr()}.json`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -5553,10 +5916,10 @@ function generateIcs() {
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
-    'PRODID:-//Studio Schedule//EN',
+    'PRODID:-//VCA Schedule//EN',
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
-    `X-WR-CALNAME:${eng ? eng.name + ' — Studio Schedule' : 'Studio Schedule — All Milestones'}`,
+    `X-WR-CALNAME:${eng ? eng.name + ' — VCA Schedule' : 'VCA Schedule — All Milestones'}`,
   ];
   const now = icsTimestamp(new Date());
 
@@ -5625,17 +5988,22 @@ function loadDemo() {
     if (!confirm('Replace current data with demo data?')) return;
   }
   STATE.data.engineers = [
-    { id: 'e_a', name: 'A', role: 'engineer', color: ENG_COLORS[0] },
-    { id: 'e_b', name: 'B', role: 'engineer', color: ENG_COLORS[1] },
-    { id: 'e_c', name: 'C', role: 'engineer', color: ENG_COLORS[2] },
+    { id: 'e_aq', name: 'Alex Quinonez',  role: 'engineer', color: ENG_COLORS[0] },
+    { id: 'e_np', name: 'Noah Park',      role: 'engineer', color: ENG_COLORS[1] },
+    { id: 'e_ja', name: 'Jungwon Ahn',    role: 'engineer', color: ENG_COLORS[2] },
+    { id: 'e_mk', name: 'Minsun Ku',      role: 'engineer', color: ENG_COLORS[3] },
+    { id: 'e_bj', name: 'Billy Jimenez',  role: 'engineer', color: ENG_COLORS[4] },
+    { id: 'e_db', name: 'Dohyun Bak',     role: 'engineer', color: ENG_COLORS[5] },
+    { id: 'e_an', name: 'Alex Nahmgoong', role: 'drafter',  color: ENG_COLORS[6] },
+    { id: 'e_amy',name: 'Amy Jang',       role: 'drafter',  color: ENG_COLORS[7] },
   ];
   STATE.data.categories = [
     { id: 'cat_sd',  name: 'SD',  color: '#6b9bd1' },
     { id: 'cat_dd',  name: 'DD',  color: '#8aa86a' },
     { id: 'cat_cd',  name: 'CD',  color: '#b888c4' },
-    { id: 'cat_dsa', name: 'DSA Backcheck', color: '#d49e3a' },
+    { id: 'cat_dsa', name: 'AHJ Plancheck', color: '#d49e3a' },
   ];
-  if (!STATE.data.currentUserId) STATE.data.currentUserId = 'e_a';
+  if (!STATE.data.currentUserId) STATE.data.currentUserId = 'e_np';
   const t = today();
   const dStr = (offset) => fmtDate(addDays(t, offset));
   const nowIso = new Date().toISOString();
@@ -5644,7 +6012,7 @@ function loadDemo() {
     {
       id: 'p_1', number: '24-105', name: 'Westside Medical Tower', client: 'DSA · WMC Hospital Group',
       managerId: '', statusId: 'st_inprogress', expanded: true,
-      createdAt: nowIso, createdBy: 'e_a',
+      createdAt: nowIso, createdBy: 'e_np',
       milestones: [
         { id: 'm_1a1', name: 'Initial concept review', categoryId: 'cat_sd', statusId: 'st_complete', dueDate: dStr(-14), assigneeIds: [], tasks: [], notes: '', progress: 100 },
         { id: 'm_1a2', name: 'Schematic plans', categoryId: 'cat_sd', statusId: 'st_inprogress', dueDate: dStr(5), assigneeIds: [], tasks: [
@@ -5663,9 +6031,9 @@ function loadDemo() {
     {
       id: 'p_2', number: '24-118', name: 'Eastside Apartments', client: 'Greenfield Development',
       managerId: '', statusId: 'st_inprogress', expanded: true,
-      createdAt: nowIso, createdBy: 'e_a',
+      createdAt: nowIso, createdBy: 'e_np',
       milestones: [
-        { id: 'm_2a1', name: 'Foundation analysis', categoryId: 'cat_sd', statusId: 'st_review', dueDate: dStr(2), assigneeIds: [], tasks: [
+        { id: 'm_2a1', name: 'Foundation analysis', categoryId: 'cat_sd', statusId: 'st_inprogress', dueDate: dStr(2), assigneeIds: [], tasks: [
           { id: 't_3', name: 'Soil interpretation', assigneeId: '', start: dStr(-3), end: dStr(2) },
         ], notes: 'Soil report received from geotech' },
         { id: 'm_2a2', name: 'Lateral system selection', categoryId: 'cat_sd', statusId: 'st_inprogress', dueDate: dStr(12), assigneeIds: [], tasks: [], notes: '', progress: 50 },
@@ -5676,7 +6044,7 @@ function loadDemo() {
     {
       id: 'p_3', number: '23-088', name: 'Cathedral Plaza Retrofit', client: 'Diocese of LA',
       managerId: '', statusId: 'st_inprogress', expanded: true,
-      createdAt: nowIso, createdBy: 'e_a',
+      createdAt: nowIso, createdBy: 'e_np',
       milestones: [
         { id: 'm_3a1', name: 'Field survey report', categoryId: 'cat_sd', statusId: 'st_complete', dueDate: dStr(-30), assigneeIds: [], tasks: [], notes: '', progress: 100 },
         { id: 'm_3a2', name: 'Existing conditions drawings', categoryId: 'cat_sd', statusId: 'st_inprogress', dueDate: dStr(8), assigneeIds: [], tasks: [
@@ -5690,7 +6058,7 @@ function loadDemo() {
     {
       id: 'p_4', number: '24-127', name: 'Innovation High School', client: 'DSA · LAUSD',
       managerId: '', statusId: 'st_inprogress', expanded: true,
-      createdAt: nowIso, createdBy: 'e_a',
+      createdAt: nowIso, createdBy: 'e_np',
       milestones: [
         { id: 'm_4a1', name: 'Seismic anchor calcs', categoryId: 'cat_dd', statusId: 'st_inprogress', dueDate: dStr(3), assigneeIds: [], tasks: [
           { id: 't_5', name: 'ASCE 7-22 Ch.13', assigneeId: '', start: dStr(-1), end: dStr(3) },
@@ -5703,7 +6071,7 @@ function loadDemo() {
     {
       id: 'p_5', number: '25-014', name: 'Harbor Industrial TI', client: 'Port Authority',
       managerId: '', statusId: 'st_inprogress', expanded: true,
-      createdAt: nowIso, createdBy: 'e_a',
+      createdAt: nowIso, createdBy: 'e_np',
       milestones: [
         { id: 'm_5a1', name: 'Mezzanine framing', categoryId: 'cat_dd', statusId: 'st_inprogress', dueDate: dStr(7), assigneeIds: [], tasks: [
           { id: 't_6', name: 'Calcs', assigneeId: '', start: dStr(0), end: dStr(7) },
@@ -5807,6 +6175,8 @@ async function init() {
     openNewProjectModal();
   });
   $('#settingsBtn').addEventListener('click', openSettings);
+  $('#printBtn').addEventListener('click', openPrintDialog);
+  $('#currentUserBadge').addEventListener('click', promptForUserIdentity);
   $('#importCsvBtn').addEventListener('click', openCsvImport);
   $('#exportIcsBtn').addEventListener('click', openIcsExport);
   $('#exportIcsBtn2').addEventListener('click', openIcsExport);
@@ -5858,7 +6228,6 @@ async function init() {
   $('#qfCategory').addEventListener('click', (e) => openQuickFilterPicker(e.currentTarget, 'category'));
   $('#qfClient').addEventListener('click', (e) => openQuickFilterPicker(e.currentTarget, 'client'));
   $('#qfManager').addEventListener('click', (e) => openQuickFilterPicker(e.currentTarget, 'manager'));
-  $('#qfEngineer').addEventListener('click', (e) => openQuickFilterPicker(e.currentTarget, 'engineer'));
   $('#qfVisibility').addEventListener('click', (e) => openQuickFilterPicker(e.currentTarget, 'visibility'));
 
   // Filter separator: click to collapse Quick group, drag to swap group order.
@@ -5963,6 +6332,64 @@ async function init() {
   renderAll();
   // Initial: today at left
   setTimeout(scrollTodayDefault, 100);
+
+  // If we don't know who's using this browser yet, ask. Once they pick, the
+  // choice is stored in localStorage and persists for that browser/profile.
+  if (!STATE.data.currentUserId) {
+    setTimeout(promptForUserIdentity, 400);
+  }
+}
+
+// Modal asking "Who are you?" — shown the first time someone opens the app on
+// a given browser (or after they explicitly clear it in Settings). The pick
+// is saved to localStorage under CURRENT_USER_KEY so the same Chrome / Edge
+// profile remembers it indefinitely.
+function promptForUserIdentity() {
+  // Don't prompt if a modal is already open
+  if ($('#modalRoot').children.length > 0) return;
+  const engineers = STATE.data.engineers || [];
+  if (engineers.length === 0) return;
+
+  const cards = engineers.map(e => `
+    <button type="button" class="user-pick-card" data-uid="${e.id}">
+      <span class="eng-dot" style="background:${e.color}; width:14px; height:14px;"></span>
+      <span style="flex:1; text-align:left;">
+        <div style="font-weight:600;">${escapeHtml(e.name)}</div>
+        <div style="font-size:10px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.3px;">${escapeHtml(e.role)}</div>
+      </span>
+    </button>
+  `).join('');
+
+  const html = `
+    <div class="modal-content" style="max-width: 480px;">
+      <h2 style="margin-bottom: 6px;">Who are you?</h2>
+      <p style="color: var(--text-dim); font-size: 12px; margin-bottom: 16px;">
+        This identifies you for created-by, "My Work", and ownership of private milestones.
+        Your choice is remembered on this browser. You can change it anytime in <strong>⚙ Settings</strong>.
+      </p>
+      <div class="user-pick-grid">
+        ${cards}
+      </div>
+      <div style="margin-top: 14px; display: flex; justify-content: space-between; align-items: center;">
+        <span style="font-size: 11px; color: var(--text-faint);">Not in the list? Add yourself in Settings.</span>
+        <button class="btn small" id="userPickSkip">Skip for now</button>
+      </div>
+    </div>
+  `;
+  showModal(html);
+
+  document.querySelectorAll('.user-pick-card').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const uid = btn.dataset.uid;
+      STATE.data.currentUserId = uid;
+      saveData();
+      closeModal();
+      const eng = getEngineer(uid);
+      toast(`Signed in as ${eng?.name || 'unknown'}`, 'success');
+      renderAll();
+    });
+  });
+  $('#userPickSkip').addEventListener('click', closeModal);
 }
 
 init();
