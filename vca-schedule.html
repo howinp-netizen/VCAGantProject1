@@ -31,7 +31,8 @@
   --ok: #5fa978;
   --grid: #232b36;
   --grid-strong: #2d3845;
-  --weekend: #161b22;
+  --weekend: #0e1116;
+  --weekend-stripe: rgba(120,140,160,0.06);
   --today: #d4a57433;
   --dirty: #d49e3a;
 }
@@ -458,7 +459,7 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
   align-items: center; justify-content: center; flex-direction: column;
   font-size: 10px; color: var(--text-dim); position: relative;
 }
-.minor-cell.weekend { background: var(--weekend); }
+.minor-cell.weekend { background: var(--weekend); color: var(--text-faint); }
 .minor-cell.today {
   background: var(--today); color: var(--accent); font-weight: 700;
   box-shadow: inset 0 -2px 0 var(--accent);
@@ -478,7 +479,7 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
      does NOT shift cell positions when popups open or content height changes. */
   scrollbar-gutter: stable;
 }
-.gantt-side-body-inner { width: 100%; min-width: 0; }
+.gantt-side-body-inner { min-width: 100%; }
 
 .gantt-grid-wrap { flex: 1; overflow: auto; position: relative; min-width: 0; }
 
@@ -622,7 +623,18 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 .eng-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; flex-shrink: 0; }
 .eng-dots { display: inline-flex; gap: 2px; margin-right: 6px; flex-shrink: 0; }
 
-.row-grid { height: 32px; position: relative; border-bottom: 1px solid var(--grid); }
+.row-grid { height: 32px; position: relative; border-bottom: 1px solid var(--grid); z-index: 1; }
+
+/* Weekend background bands inside the Gantt body. Behind rows so the
+   row-grid horizontal lines and bars sit on top, but visible through the
+   transparent row backgrounds. */
+.weekend-band {
+  position: absolute; top: 0; bottom: 0;
+  background: var(--weekend);
+  box-shadow: inset 1px 0 0 var(--weekend-stripe), inset -1px 0 0 var(--weekend-stripe);
+  z-index: 0;
+  pointer-events: none;
+}
 
 .bar {
   position: absolute; height: 18px; top: 7px; border-radius: 3px; cursor: pointer;
@@ -894,12 +906,23 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 .cal-day.today .cal-day-num { color: var(--accent); font-weight: 600; }
 .cal-events { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
 .cal-event {
-  padding: 2px 6px; border-radius: 2px; font-size: 10px;
+  padding: 3px 6px; border-radius: 3px; font-size: 10px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   cursor: pointer; border-left: 3px solid; line-height: 1.3;
 }
 .cal-event.task { opacity: 0.75; font-style: italic; }
-.cal-event:hover { filter: brightness(1.2); }
+/* Milestone deadlines really stand out: solid brick-red block with white text,
+   subtle shadow for depth, slight scale-up on hover. */
+.cal-event.milestone {
+  font-weight: 700;
+  border-left-width: 0;
+  padding: 3px 7px;
+  letter-spacing: 0.2px;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.35);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.45);
+}
+.cal-event:hover { filter: brightness(1.15); transform: translateX(1px); }
+.cal-event.milestone:hover { transform: translateX(0) scale(1.02); filter: brightness(1.08); }
 
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex;
@@ -1022,6 +1045,8 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
     <div class="divider"></div>
     <div class="tool-group">
       <button class="btn" id="columnsBtn" title="Show or hide columns">⊞ Columns</button>
+      <button class="btn" id="expandAllBtn" title="Expand all projects">⊕ Expand All</button>
+      <button class="btn" id="collapseAllBtn" title="Collapse all projects">⊖ Collapse All</button>
     </div>
     <div class="tool-group" style="margin-left: auto;">
       <button class="btn" id="todayBtn" title="Scroll today to the left edge">⇤ Today</button>
@@ -1149,6 +1174,11 @@ const STATE = {
     due:     { visible: true,  width: 80,  label: 'Due',        required: false },
     status:  { visible: true,  width: 110, label: 'Status',     required: false },
   },
+  // How much of the side panel is *visible* on screen. The side panel itself
+  // is always laid out at totalSideWidth(); when this value is smaller, the
+  // container clips the rightmost columns and the Gantt area covers them.
+  // null = show everything (default), <number> = clipped width.
+  sidePanelVisibleWidth: null,
   workloadThreshold: 3,
   // Filter bar layout: which side each group sits on, and whether quick group is collapsed
   filterBarLayout: { quickFirst: true, quickCollapsed: false },
@@ -1230,6 +1260,7 @@ function loadLocal() {
       STATE.data.categories = parsed.categories || STATE.data.categories;
       STATE.data.projects = parsed.projects || [];
       if (parsed._sidePanelWidth) STATE.sidePanelWidth = parsed._sidePanelWidth;
+      if (parsed._sidePanelVisibleWidth !== undefined) STATE.sidePanelVisibleWidth = parsed._sidePanelVisibleWidth;
       if (parsed._columnSettings) {
         // merge so new columns added in code still appear with defaults
         for (const k of Object.keys(STATE.columnSettings)) {
@@ -1311,12 +1342,14 @@ function loadLocal() {
       }
     }
   } catch(e) { console.error(e); }
+  applyViewStateToData();
 }
 function saveLocal() {
   try {
     localStorage.setItem(LS_KEY, JSON.stringify({
       ...STATE.data,
       _sidePanelWidth: STATE.sidePanelWidth,
+      _sidePanelVisibleWidth: STATE.sidePanelVisibleWidth,
       _columnSettings: STATE.columnSettings,
       _workloadThreshold: STATE.workloadThreshold,
       _filterBarLayout: STATE.filterBarLayout,
@@ -1325,6 +1358,118 @@ function saveLocal() {
     if (STATE.data.currentUserId) localStorage.setItem(CURRENT_USER_KEY, STATE.data.currentUserId);
     else localStorage.removeItem(CURRENT_USER_KEY);
   } catch(e) {}
+}
+
+// ============== USER PREFERENCES SYNC ==============
+//
+// Per-engineer personal preferences that follow the user across browsers.
+// Stored in Firestore at userPrefs/{engineerId}. Includes:
+//   - colorOverrides: my custom colors for each teammate
+//   - deadlineColors: my chosen calendar deadline color
+//   - viewState:      which projects/milestones I have expanded
+//   - sidePanelVisibleWidth: how wide my side panel is
+//   - columnSettings: my column widths and visibility
+//   - filterBarLayout, projectSort, workloadThreshold
+//
+// localStorage still holds these as a fast cache so the app starts
+// instantly with last-known values; Firestore is the source of truth once
+// the network round-trip completes.
+//
+const USER_PREFS_DEBOUNCE_MS = 800;
+let _userPrefsSaveTimer = null;
+let _userPrefsUnsub = null;
+let _suspendUserPrefsSync = false;
+
+function buildUserPrefsPayload() {
+  return {
+    colorOverrides: STATE.colorOverrides || {},
+    deadlineColors: STATE.deadlineColors || {},
+    viewState: STATE.viewState || {},
+    sidePanelVisibleWidth: STATE.sidePanelVisibleWidth ?? null,
+    columnSettings: STATE.columnSettings || {},
+    filterBarLayout: STATE.filterBarLayout || {},
+    projectSort: STATE.projectSort || 'manual',
+    workloadThreshold: STATE.workloadThreshold ?? 3,
+    _updated: new Date().toISOString(),
+  };
+}
+
+function applyUserPrefsPayload(p) {
+  if (!p || typeof p !== 'object') return;
+  _suspendUserPrefsSync = true;
+  try {
+    if (p.colorOverrides && typeof p.colorOverrides === 'object') {
+      STATE.colorOverrides = p.colorOverrides;
+      localStorage.setItem(COLOR_OVERRIDE_KEY, JSON.stringify(STATE.colorOverrides));
+    }
+    if (p.deadlineColors && typeof p.deadlineColors === 'object') {
+      if (p.deadlineColors.bg) localStorage.setItem(DEADLINE_COLOR_KEY, p.deadlineColors.bg);
+      if (p.deadlineColors.fg) localStorage.setItem(DEADLINE_TEXT_KEY,  p.deadlineColors.fg);
+      STATE.deadlineColors = loadDeadlineColors();
+    }
+    if (p.viewState && typeof p.viewState === 'object') {
+      STATE.viewState = p.viewState;
+      localStorage.setItem(VIEW_STATE_KEY, JSON.stringify(STATE.viewState));
+      applyViewStateToData();
+    }
+    if (p.sidePanelVisibleWidth !== undefined) {
+      STATE.sidePanelVisibleWidth = p.sidePanelVisibleWidth;
+    }
+    if (p.columnSettings && typeof p.columnSettings === 'object') {
+      // Merge each known column's saved width/visible into our defaults
+      for (const k of Object.keys(STATE.columnSettings)) {
+        if (p.columnSettings[k]) {
+          STATE.columnSettings[k] = { ...STATE.columnSettings[k], ...p.columnSettings[k] };
+        }
+      }
+    }
+    if (p.filterBarLayout) STATE.filterBarLayout = { ...STATE.filterBarLayout, ...p.filterBarLayout };
+    if (typeof p.projectSort === 'string') STATE.projectSort = p.projectSort;
+    if (typeof p.workloadThreshold === 'number') STATE.workloadThreshold = p.workloadThreshold;
+    saveLocal();
+  } finally {
+    _suspendUserPrefsSync = false;
+  }
+}
+
+// Debounced — every preference-mutating function calls this; we batch
+// writes so picking a color or expanding a row doesn't fire a Firestore
+// write per micro-event.
+function scheduleUserPrefsSync() {
+  if (_suspendUserPrefsSync) return;
+  if (!STATE.firebase) return;
+  if (!STATE.data.currentUserId) return;
+  if (_userPrefsSaveTimer) clearTimeout(_userPrefsSaveTimer);
+  _userPrefsSaveTimer = setTimeout(async () => {
+    _userPrefsSaveTimer = null;
+    try {
+      const { db, doc, setDoc } = STATE.firebase;
+      const ref = doc(db, 'userPrefs', STATE.data.currentUserId);
+      await setDoc(ref, buildUserPrefsPayload());
+    } catch (e) {
+      console.error('User prefs sync failed', e);
+    }
+  }, USER_PREFS_DEBOUNCE_MS);
+}
+
+// Subscribe to my own user-prefs document so changes I make in another
+// browser flow into this one in real time. Called once after Firebase init
+// (and re-called if currentUserId changes).
+function subscribeUserPrefs() {
+  if (_userPrefsUnsub) { _userPrefsUnsub(); _userPrefsUnsub = null; }
+  if (!STATE.firebase || !STATE.data.currentUserId) return;
+  const { db, doc, onSnapshot } = STATE.firebase;
+  const ref = doc(db, 'userPrefs', STATE.data.currentUserId);
+  _userPrefsUnsub = onSnapshot(ref, (snap) => {
+    if (!snap.exists()) return;
+    if (isUserActivelyTyping()) {
+      // Defer same as project sync — don't blow away in-progress edits
+      STATE._pendingUserPrefs = snap.data();
+      return;
+    }
+    applyUserPrefsPayload(snap.data());
+    renderAll();
+  });
 }
 
 // Default Firebase config — baked into the deployed app so every user is
@@ -1361,52 +1506,121 @@ async function initFirebase() {
     STATE.firebase = { db, doc, setDoc, onSnapshot };
     const ref = doc(db, 'schedules', 'main');
     STATE.firebaseUnsub = onSnapshot(ref, (snap) => {
-      if (snap.exists()) {
-        const d = snap.data();
-        if (d._writer === STATE._writerId) return;
-        let cloudEngineers = Array.isArray(d.engineers) ? d.engineers : [];
-
-        // Defensive recovery: if cloud engineers list is empty or missing
-        // members of the default VCA team, merge them back in. This guards
-        // against accidental wipes (e.g. someone clears their roster locally
-        // and that empty state syncs out). Custom engineers added by users
-        // are preserved.
-        const VCA_TEAM = [
-          { id: 'e_aq',  name: 'Alex Quinonez',  role: 'engineer', color: ENG_COLORS[0] },
-          { id: 'e_np',  name: 'Noah Park',      role: 'engineer', color: ENG_COLORS[1] },
-          { id: 'e_ja',  name: 'Jungwon Ahn',    role: 'engineer', color: ENG_COLORS[2] },
-          { id: 'e_mk',  name: 'Minsun Ku',      role: 'engineer', color: ENG_COLORS[3] },
-          { id: 'e_bj',  name: 'Billy Jimenez',  role: 'engineer', color: ENG_COLORS[4] },
-          { id: 'e_db',  name: 'Dohyun Bak',     role: 'engineer', color: ENG_COLORS[5] },
-          { id: 'e_an',  name: 'Alex Nahmgoong', role: 'drafter',  color: ENG_COLORS[6] },
-          { id: 'e_amy', name: 'Amy Jang',       role: 'drafter',  color: ENG_COLORS[7] },
-        ];
-        const existing = new Set(cloudEngineers.map(e => e.id));
-        let added = false;
-        for (const m of VCA_TEAM) {
-          if (!existing.has(m.id)) { cloudEngineers.push(m); added = true; }
+      if (!snap.exists()) return;
+      const d = snap.data();
+      if (d._writer === STATE._writerId) return;
+      // If user is mid-typing (rename input, new-project modal, detail
+      // panel field, etc.), DO NOT re-render now — store the snapshot and
+      // apply it once they blur. Otherwise their input element gets blown
+      // away by renderAll() and they lose their text.
+      if (isUserActivelyTyping()) {
+        STATE._pendingSnapshot = d;
+        // Show one-time hint so they know there are pending updates
+        if (!STATE._pendingNotified) {
+          STATE._pendingNotified = true;
+          toast('Updates pending — they will apply when you finish typing.', 'info');
+          setTimeout(() => { STATE._pendingNotified = false; }, 4000);
         }
-
-        STATE.data.engineers = cloudEngineers;
-        STATE.data.statuses  = d.statuses  || STATE.data.statuses;
-        STATE.data.categories = d.categories || STATE.data.categories;
-        STATE.data.projects  = d.projects  || [];
-        STATE.data.trash     = d.trash     || STATE.data.trash || [];
-        renderAll();
-
-        // If we patched in missing VCA team members, push the patched roster
-        // back so other clients converge to the same restored state.
-        if (added) saveData();
+        return;
       }
+      applyIncomingSnapshot(d);
     });
     $('#syncStatus').textContent = '☁ Cloud';
     $('#syncStatus').style.color = 'var(--ok)';
+    // Subscribe to MY userPrefs document so my color/view choices flow
+    // across browsers. Will re-subscribe whenever currentUserId changes.
+    subscribeUserPrefs();
     return true;
   } catch(e) {
     console.error('Firebase init failed', e);
     toast('Cloud sync failed — using local only', 'error');
     return false;
   }
+}
+
+// Apply a Firestore snapshot to STATE and re-render. Called either directly
+// from onSnapshot when the user is idle, or deferred via STATE._pendingSnapshot
+// after they finish typing. Includes the dirty-edit guard and engineer
+// roster self-healing.
+function applyIncomingSnapshot(d) {
+  let cloudEngineers = Array.isArray(d.engineers) ? d.engineers : [];
+  // Defensive recovery: if cloud engineers list is empty or missing
+  // members of the default VCA team, merge them back in.
+  const VCA_TEAM = [
+    { id: 'e_aq',  name: 'Alex Quinonez',  role: 'engineer', color: ENG_COLORS[0] },
+    { id: 'e_np',  name: 'Noah Park',      role: 'engineer', color: ENG_COLORS[1] },
+    { id: 'e_ja',  name: 'Jungwon Ahn',    role: 'engineer', color: ENG_COLORS[2] },
+    { id: 'e_mk',  name: 'Minsun Ku',      role: 'engineer', color: ENG_COLORS[3] },
+    { id: 'e_bj',  name: 'Billy Jimenez',  role: 'engineer', color: ENG_COLORS[4] },
+    { id: 'e_db',  name: 'Dohyun Bak',     role: 'engineer', color: ENG_COLORS[5] },
+    { id: 'e_an',  name: 'Alex Nahmgoong', role: 'drafter',  color: ENG_COLORS[6] },
+    { id: 'e_amy', name: 'Amy Jang',       role: 'drafter',  color: ENG_COLORS[7] },
+  ];
+  const existing = new Set(cloudEngineers.map(e => e.id));
+  let added = false;
+  for (const m of VCA_TEAM) {
+    if (!existing.has(m.id)) { cloudEngineers.push(m); added = true; }
+  }
+
+  STATE.data.engineers = cloudEngineers;
+  STATE.data.statuses  = d.statuses  || STATE.data.statuses;
+  STATE.data.categories = d.categories || STATE.data.categories;
+
+  // Conflict guard: if the user is in the middle of editing a project
+  // or milestone (detail panel has unsaved changes), keep their copy
+  // of THAT specific item and apply the cloud update to everything
+  // else.
+  const editingItemKey = (() => {
+    if (!isDirty() || !STATE.selectedItem) return null;
+    const sel = STATE.selectedItem;
+    if (sel.type === 'project')   return `project:${sel.projectId}`;
+    if (sel.type === 'milestone') return `milestone:${sel.milestoneId}`;
+    if (sel.type === 'task')      return `task:${sel.taskId}`;
+    return null;
+  })();
+
+  const incomingProjects = d.projects || [];
+  if (editingItemKey) {
+    const myProjects = STATE.data.projects;
+    const merged = incomingProjects.map(ip => {
+      if (editingItemKey === `project:${ip.id}`) {
+        return myProjects.find(x => x.id === ip.id) || ip;
+      }
+      if (STATE.selectedItem.projectId === ip.id) {
+        const myCopy = myProjects.find(x => x.id === ip.id);
+        if (myCopy) {
+          const mergedProj = JSON.parse(JSON.stringify(ip));
+          if (STATE.selectedItem.type === 'milestone') {
+            const mIdx = (mergedProj.milestones || []).findIndex(m => m.id === STATE.selectedItem.milestoneId);
+            const myMile = (myCopy.milestones || []).find(m => m.id === STATE.selectedItem.milestoneId);
+            if (mIdx >= 0 && myMile) mergedProj.milestones[mIdx] = myMile;
+          } else if (STATE.selectedItem.type === 'task') {
+            for (const m of (mergedProj.milestones || [])) {
+              if (m.id !== STATE.selectedItem.milestoneId) continue;
+              const tIdx = (m.tasks || []).findIndex(t => t.id === STATE.selectedItem.taskId);
+              const myMile = (myCopy.milestones || []).find(x => x.id === STATE.selectedItem.milestoneId);
+              const myTask = (myMile?.tasks || []).find(t => t.id === STATE.selectedItem.taskId);
+              if (tIdx >= 0 && myTask) m.tasks[tIdx] = myTask;
+            }
+          }
+          return mergedProj;
+        }
+      }
+      return ip;
+    });
+    STATE.data.projects = merged;
+    if (!STATE._conflictNotified) {
+      STATE._conflictNotified = true;
+      toast('Someone else updated this — your edits are preserved. Save or Discard to sync.', 'info');
+      setTimeout(() => { STATE._conflictNotified = false; }, 3000);
+    }
+  } else {
+    STATE.data.projects = incomingProjects;
+  }
+  STATE.data.trash = d.trash || STATE.data.trash || [];
+  applyViewStateToData();
+  renderAll();
+  if (added) saveData();
 }
 
 // Permission: only signed-in engineers can create projects. Drafters and
@@ -1422,6 +1636,35 @@ function canCreateProject(showToast) {
     return false;
   }
   return true;
+}
+
+// Permission: a project can be deleted by its creator or its current manager.
+// This prevents other engineers from accidentally deleting someone else's
+// project. Drafters and unidentified users always denied.
+function canDeleteProject(p, showToast) {
+  const me = STATE.data.currentUserId;
+  if (!me) {
+    if (showToast) toast('Please identify yourself first (top-right badge)', 'error');
+    return false;
+  }
+  if (p.createdBy === me) return true;
+  if (p.managerId === me) return true;
+  if (showToast) {
+    const owner = getEngineer(p.createdBy) || getEngineer(p.managerId);
+    toast(`Only ${owner ? owner.name : 'the project owner'} can delete this project.`, 'error');
+  }
+  return false;
+}
+
+// Milestone/task delete: allowed if the user is the project creator,
+// current manager, or the milestone/task's own creator.
+function canDeleteMilestone(p, m, showToast) {
+  const me = STATE.data.currentUserId;
+  if (!me) { if (showToast) toast('Please identify yourself first', 'error'); return false; }
+  if (p.createdBy === me || p.managerId === me) return true;
+  if (m.createdBy === me) return true;
+  if (showToast) toast('Only the project owner or milestone creator can delete this.', 'error');
+  return false;
 }
 
 STATE._writerId = uid('w');
@@ -1447,6 +1690,43 @@ const TRASH_DAYS = 30;
 STATE.undoStack = [];
 STATE.redoStack = [];
 STATE._suspendUndoCapture = false; // prevent capturing during an undo/redo itself
+
+// ============== INCOMING-SYNC GUARD ==============
+//
+// When a Firestore sync arrives, we normally re-render the whole UI. That's
+// disruptive if the user is currently typing into an inline rename input,
+// the new-project modal, the detail panel, etc. — re-rendering blows away
+// their input element and any text not yet committed.
+//
+// To prevent this, we:
+//   1. Track every focused input/textarea/select via a global focusin handler.
+//   2. When a snapshot arrives during active typing, stash it in
+//      STATE._pendingSnapshot and skip the merge/render until the user blurs.
+//   3. On blur (or modal/popup close), apply any pending snapshot.
+//
+STATE._pendingSnapshot = null;
+
+function isUserActivelyTyping() {
+  const el = document.activeElement;
+  if (el) {
+    const tag = el.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (el.isContentEditable) return true;
+  }
+  // A popup or modal is open — sync would close it, so wait.
+  if (document.getElementById('activePopup')) return true;
+  const modalRoot = document.getElementById('modalRoot');
+  if (modalRoot && modalRoot.children.length > 0) return true;
+  return false;
+}
+
+// Wired up once at init time. We re-apply STATE._pendingSnapshot when the
+// last input blurs (i.e. nothing is focused anymore).
+function attachActiveInputTracker() {
+  document.addEventListener('focusout', () => {
+    flushPendingSnapshotIfIdle();
+  }, true);
+}
 
 function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
 
@@ -1802,6 +2082,130 @@ function logHistory(projectId, action) {
 
 /* ============== DATA HELPERS ============== */
 function getEngineer(id) { return STATE.data.engineers.find(e => e.id === id); }
+
+// Per-user color overrides. Each browser keeps its own preferred color for
+// each engineer in localStorage. The shared engineer list (Firestore) is
+// untouched — only the *display* color changes for the current viewer.
+const COLOR_OVERRIDE_KEY = 'studio-schedule-color-overrides';
+function loadColorOverrides() {
+  try { return JSON.parse(localStorage.getItem(COLOR_OVERRIDE_KEY) || '{}'); }
+  catch (e) { return {}; }
+}
+function saveColorOverrides(map) {
+  localStorage.setItem(COLOR_OVERRIDE_KEY, JSON.stringify(map || {}));
+}
+STATE.colorOverrides = loadColorOverrides();
+
+// Personal preference for the calendar's milestone (deadline) color.
+// Stored locally per browser like other color overrides. Default is a
+// muted terracotta that reads as "deadline" without being aggressive.
+const DEADLINE_COLOR_KEY = 'studio-schedule-deadline-color';
+const DEADLINE_TEXT_KEY = 'studio-schedule-deadline-text';
+const DEFAULT_DEADLINE_BG = '#a8554a';
+const DEFAULT_DEADLINE_FG = '#fbeee5';
+function loadDeadlineColors() {
+  return {
+    bg: localStorage.getItem(DEADLINE_COLOR_KEY) || DEFAULT_DEADLINE_BG,
+    fg: localStorage.getItem(DEADLINE_TEXT_KEY)  || DEFAULT_DEADLINE_FG,
+  };
+}
+function saveDeadlineColor(bg, fg) {
+  if (bg) localStorage.setItem(DEADLINE_COLOR_KEY, bg);
+  if (fg) localStorage.setItem(DEADLINE_TEXT_KEY, fg);
+  STATE.deadlineColors = loadDeadlineColors();
+  scheduleUserPrefsSync();
+}
+function resetDeadlineColors() {
+  localStorage.removeItem(DEADLINE_COLOR_KEY);
+  localStorage.removeItem(DEADLINE_TEXT_KEY);
+  STATE.deadlineColors = loadDeadlineColors();
+  scheduleUserPrefsSync();
+}
+STATE.deadlineColors = loadDeadlineColors();
+// Returns the color the current viewer should see for this engineer:
+// the local override if set, otherwise the engineer's shared color.
+function getEngineerColor(engOrId) {
+  const eng = (typeof engOrId === 'string') ? getEngineer(engOrId) : engOrId;
+  if (!eng) return '#5a6573';
+  const ovr = STATE.colorOverrides[eng.id];
+  return ovr || eng.color || '#5a6573';
+}
+
+// Compact two-letter abbreviation for an engineer's name. Used in tight
+// spaces (calendar tiles, narrow Gantt columns) where the full name doesn't
+// fit. "Alex Quinonez" → "AQ", "Noah Park" → "NP", "Amy" → "AM".
+function abbreviateName(name) {
+  if (!name) return '';
+  const parts = String(name).trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  return parts[0].slice(0, 2).toUpperCase();
+}
+function setEngineerColorOverride(engId, color) {
+  if (!engId) return;
+  if (color) STATE.colorOverrides[engId] = color;
+  else delete STATE.colorOverrides[engId];
+  saveColorOverrides(STATE.colorOverrides);
+  scheduleUserPrefsSync();
+}
+function clearEngineerColorOverride(engId) {
+  delete STATE.colorOverrides[engId];
+  saveColorOverrides(STATE.colorOverrides);
+  scheduleUserPrefsSync();
+}
+function clearAllColorOverrides() {
+  STATE.colorOverrides = {};
+  saveColorOverrides({});
+  scheduleUserPrefsSync();
+}
+
+// View state — per-viewer UI state that should NOT sync to other users.
+// Expanded/collapsed of projects/milestones is one example: when I collapse
+// a project on my screen, I don't want everyone else to suddenly see it
+// collapsed too. We persist these in localStorage keyed by item id.
+const VIEW_STATE_KEY = 'studio-schedule-view-state';
+function loadViewState() {
+  try { return JSON.parse(localStorage.getItem(VIEW_STATE_KEY) || '{}'); }
+  catch (e) { return {}; }
+}
+function saveViewStateRaw(s) {
+  localStorage.setItem(VIEW_STATE_KEY, JSON.stringify(s || {}));
+}
+STATE.viewState = loadViewState();
+// Returns whether a given project/milestone id is expanded for THIS viewer.
+// Default for projects: expanded; for milestones: collapsed.
+function isExpanded(kind, id) {
+  const key = `${kind}:${id}`;
+  if (key in STATE.viewState) return !!STATE.viewState[key];
+  return kind === 'project'; // projects default open, milestones default closed
+}
+function setExpanded(kind, id, val) {
+  STATE.viewState[`${kind}:${id}`] = !!val;
+  persistViewState();
+  scheduleUserPrefsSync();
+}
+function persistViewState() {
+  const next = { ...STATE.viewState };
+  for (const p of STATE.data.projects) {
+    next[`project:${p.id}`] = !!p.expanded;
+    for (const m of (p.milestones || [])) {
+      next[`milestone:${m.id}`] = !!m.expanded;
+    }
+  }
+  STATE.viewState = next;
+  saveViewStateRaw(next);
+  scheduleUserPrefsSync();
+}
+// Apply local view state onto the data we just received from Firestore /
+// localStorage so the UI reflects MY expand/collapse choices, not the
+// last writer's. Called after every sync.
+function applyViewStateToData() {
+  for (const p of STATE.data.projects) {
+    p.expanded = isExpanded('project', p.id);
+    for (const m of (p.milestones || [])) {
+      m.expanded = isExpanded('milestone', m.id);
+    }
+  }
+}
 function getStatus(id) { return STATE.data.statuses.find(s => s.id === id) || STATE.data.statuses[0]; }
 function getCategory(id) { return STATE.data.categories.find(c => c.id === id); }
 function getProject(id) { return STATE.data.projects.find(p => p.id === id); }
@@ -1872,7 +2276,7 @@ function getColorFor(item, type) {
     if (type === 'task') assigneeId = item.assigneeId;
     else if (type === 'milestone') assigneeId = (item.assigneeIds && item.assigneeIds[0]) || null;
     const eng = getEngineer(assigneeId);
-    return eng ? eng.color : '#5a6573';
+    return getEngineerColor(eng);
   }
   if (STATE.colorMode === 'status') return getStatus(item.statusId).color;
   if (STATE.colorMode === 'urgency') {
@@ -1944,6 +2348,9 @@ const FILTER_TYPES = {
     { value: 'projects',   label: 'Hide completed projects' },
     { value: 'milestones', label: 'Hide completed milestones' },
   ]},
+  hide_all_milestones_complete: { label: 'Hide Wrapped-Up Projects', getOptions: () => [
+    { value: 'on', label: 'Hide projects whose milestones are all complete' },
+  ]},
 };
 
 function projectPassesFilters(p) {
@@ -1964,6 +2371,14 @@ function projectPassesFilters(p) {
     if (f.type === 'hide_completed' && f.value === 'projects') {
       const st = getStatus(p.statusId);
       if (st.isCompleted) return false;
+    }
+    // "All milestones complete" — hide projects where every milestone has
+    // a completed status (and the project has at least one milestone).
+    if (f.type === 'hide_all_milestones_complete') {
+      const ms = p.milestones || [];
+      if (ms.length > 0 && ms.every(m => (getStatus(m.statusId) || {}).isCompleted)) {
+        return false;
+      }
     }
     if (f.type === 'engineer') {
       let found = false;
@@ -2203,7 +2618,7 @@ function openQuickFilterPicker(anchor, type) {
         if (c) dot = `<span class="eng-dot" style="background:${c.color}"></span>`;
       } else if (type === 'manager' || type === 'engineer') {
         const e = STATE.data.engineers.find(x => x.id === o.value);
-        if (e) dot = `<span class="eng-dot" style="background:${e.color}"></span>`;
+        if (e) dot = `<span class="eng-dot" style="background:${getEngineerColor(e)}"></span>`;
       }
       html += `<div class="popup-menu-item ${active ? 'selected' : ''}" data-opt-value="${escapeHtml(o.value)}">
         <span class="popup-checkbox">${active ? '✓' : ''}</span>
@@ -2515,7 +2930,7 @@ function refreshCurrentUserBadge() {
   const me = STATE.data.currentUserId ? getEngineer(STATE.data.currentUserId) : null;
   if (me) {
     badge.classList.remove('unset');
-    dot.style.background = me.color;
+    dot.style.background = getEngineerColor(me);
     name.textContent = me.name;
     badge.title = `Signed in as ${me.name} (${me.role}). Click to change.`;
   } else {
@@ -2553,6 +2968,15 @@ function getVisibleColumns() {
 }
 function totalSideWidth() {
   return getVisibleColumns().reduce((sum, c) => sum + c.width, 0);
+}
+// What's actually visible on screen for the side panel. Defaults to the full
+// column-sum width; when the user drags the side resizer to make it smaller,
+// only this clipped width is shown — the columns themselves keep their sizes
+// and the Gantt area visually overlaps them on the right.
+function visibleSideWidth() {
+  const total = totalSideWidth();
+  if (STATE.sidePanelVisibleWidth == null) return total;
+  return Math.min(total, Math.max(60, STATE.sidePanelVisibleWidth));
 }
 // Map column keys to a quick-filter type so the column header itself can open a filter picker.
 const COLUMN_FILTER_TYPE = {
@@ -2620,7 +3044,13 @@ function renderGantt() {
   const totalDays = daysBetween(min, max) + 1;
   const dayWidth = pixelsPerDay();
   const timelineWidth = totalDays * dayWidth;
-  const sideWidth = totalSideWidth();
+  // Two widths: the inner content (all columns laid out) is fullSideWidth.
+  // The container that's visible on screen is visSideWidth — when the user
+  // shrinks the side panel, the container clips and the rightmost columns
+  // get hidden behind the Gantt area.
+  const fullSideWidth = totalSideWidth();
+  const visSideWidth = visibleSideWidth();
+  const sideWidth = visSideWidth; // backwards-compat alias used below
 
   const headerHtml = renderTimelineHeader(min, totalDays, dayWidth);
   const rows = buildGanttRows();
@@ -2635,8 +3065,8 @@ function renderGantt() {
 
   wrap.innerHTML = `
     <div class="gantt-header">
-      <div class="gantt-side-header" id="sideHeader" style="width: ${sideWidth}px;">
-        <div class="gantt-side-header-content">
+      <div class="gantt-side-header" id="sideHeader" style="width: ${visSideWidth}px;">
+        <div class="gantt-side-header-content" style="width: ${fullSideWidth}px;">
           ${renderColumnHeaders()}
         </div>
         <div class="side-resize-handle" id="sideResizer"></div>
@@ -2648,11 +3078,25 @@ function renderGantt() {
       </div>
     </div>
     <div class="gantt-body">
-      <div class="gantt-side-body" id="ganttSideScroll" style="width: ${sideWidth}px;">
-        <div class="gantt-side-body-inner">${sideHtml}</div>
+      <div class="gantt-side-body" id="ganttSideScroll" style="width: ${visSideWidth}px;">
+        <div class="gantt-side-body-inner" style="width: ${fullSideWidth}px;">${sideHtml}</div>
       </div>
       <div class="gantt-grid-wrap" id="ganttGridScroll">
         <div style="width: ${timelineWidth}px; position: relative;">
+          ${(() => {
+            // Weekend overlay: vertical bands over Sat/Sun. Drawn behind rows
+            // (z-index 0; rows are z-index 1) so weekday/weekend separation
+            // is visible across the whole chart, not just in the header.
+            let bands = '';
+            for (let i = 0; i < totalDays; i++) {
+              const d = addDays(min, i);
+              const dow = d.getDay();
+              if (dow === 0 || dow === 6) {
+                bands += `<div class="weekend-band" style="left:${i * dayWidth}px; width:${dayWidth}px;"></div>`;
+              }
+            }
+            return bands;
+          })()}
           ${gridHtml}
           <div class="today-line" style="left: ${todayOffset}px;"></div>
         </div>
@@ -3089,13 +3533,13 @@ function renderGanttSideRow(row) {
 
     const numLabel = p.number ? `<span style="color:var(--accent); font-size:10px; margin-right:6px; font-weight:600;">${escapeHtml(p.number)}</span>` : '';
     const mgrCell = mgr
-      ? `<span class="mgr-text" style="color:${mgr.color}"><span class="eng-dot" style="background:${mgr.color}"></span>${escapeHtml(mgr.name)}</span>`
+      ? `<span class="mgr-text" style="color:${getEngineerColor(mgr)}" title="${escapeHtml(mgr.name)}"><span class="eng-dot" style="background:${getEngineerColor(mgr)}"></span>${escapeHtml(abbreviateName(mgr.name))}</span>`
       : `<span class="editable-empty">— None —</span>`;
 
     const allAssignIds = [...new Set((p.milestones || []).flatMap(m => m.assigneeIds || []))];
     const assignDots = allAssignIds.slice(0, 5).map(id => {
       const e = getEngineer(id);
-      return e ? `<span class="eng-dot" style="background:${e.color}" title="${escapeHtml(e.name)}"></span>` : '';
+      return e ? `<span class="eng-dot" style="background:${getEngineerColor(e)}" title="${escapeHtml(e.name)}"></span>` : '';
     }).join('');
     const assignCell = allAssignIds.length === 0
       ? `<span class="editable-empty">—</span>`
@@ -3104,7 +3548,7 @@ function renderGanttSideRow(row) {
     return `
       <div class="row project-row">
         <div class="row-side ${sel}" data-type="project" data-project-id="${p.id}">
-          ${wrap('name', `<button class="row-delete-btn" data-delete="project" data-project-id="${p.id}" title="Delete project">×</button><span class="expand-icon" data-toggle="project" data-project-id="${p.id}">${expandIcon}</span><span class="name-text" data-rename="project" data-project-id="${p.id}" title="Click to open · double-click to rename">${numLabel}${escapeHtml(p.name)}<span class="rename-edit-icon" title="Rename">✏️</span></span><button class="row-add-btn" data-add="milestone" data-project-id="${p.id}" title="Add milestone">+</button>`)}
+          ${wrap('name', `<span class="expand-icon" data-toggle="project" data-project-id="${p.id}">${expandIcon}</span><span class="name-text" data-rename="project" data-project-id="${p.id}" title="Click to open · double-click to rename">${numLabel}${escapeHtml(p.name)}<span class="rename-edit-icon" title="Rename">✏️</span></span><button class="row-add-btn" data-add="milestone" data-project-id="${p.id}" title="Add milestone">+</button>`)}
           ${wrap('client', `<span class="client-text" title="${escapeHtml(p.client || '')}">${p.client ? escapeHtml(p.client) : '<span class=\"editable-empty\">—</span>'}</span>`)}
           ${wrap('mgr', `<span class="editable-cell" data-edit-cell="manager" data-project-id="${p.id}" title="Click to change manager">${mgrCell}</span>`)}
           ${wrap('assign', assignCell)}
@@ -3127,7 +3571,7 @@ function renderGanttSideRow(row) {
     const assigneeIds = m.assigneeIds || [];
     const assignDots = assigneeIds.slice(0, 4).map(id => {
       const e = getEngineer(id);
-      return e ? `<span class="eng-dot" style="background:${e.color}" title="${escapeHtml(e.name)}"></span>` : '';
+      return e ? `<span class="eng-dot" style="background:${getEngineerColor(e)}" title="${escapeHtml(e.name)}"></span>` : '';
     }).join('');
     const assignCell = assigneeIds.length === 0
       ? `<span class="editable-empty">+ assign</span>`
@@ -3147,7 +3591,7 @@ function renderGanttSideRow(row) {
     return `
       <div class="row milestone-row">
         <div class="row-side indent-1 ${sel}" data-type="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">
-          ${wrap('name', `<button class="row-delete-btn" data-delete="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Delete milestone">×</button><span class="expand-icon ${expandClass}" data-toggle="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">${expandIcon || '·'}</span><span class="name-text" data-rename="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Click to open · double-click to rename">◆ ${escapeHtml(m.name)}<span class="rename-edit-icon" title="Rename">✏️</span></span>${visBadge}${progressIcon}<button class="row-add-btn" data-add="task" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Add task to this milestone">+</button>`)}
+          ${wrap('name', `<span class="expand-icon ${expandClass}" data-toggle="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">${expandIcon || '·'}</span><span class="name-text" data-rename="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Click to open · double-click to rename">◆ ${escapeHtml(m.name)}<span class="rename-edit-icon" title="Rename">✏️</span></span>${visBadge}${progressIcon}<button class="row-add-btn" data-add="task" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Add task to this milestone">+</button>`)}
           ${wrap('client', '')}
           ${wrap('mgr', '')}
           ${wrap('assign', `<span class="editable-cell" data-edit-cell="assignees" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Click to assign">${assignCell}</span>`)}
@@ -3163,7 +3607,7 @@ function renderGanttSideRow(row) {
     const eng = getEngineer(t.assigneeId);
     const sel = isSelectedRow('task', { projectId: row.project.id, milestoneId: row.milestone.id, taskId: t.id }) ? 'selected' : '';
     const assignCell = eng
-      ? `<span class="assign-text"><span class="eng-dot" style="background:${eng.color}"></span><span style="font-size:11px; color:${eng.color};">${escapeHtml(eng.name)}</span></span>`
+      ? `<span class="assign-text" title="${escapeHtml(eng.name)}"><span class="eng-dot" style="background:${getEngineerColor(eng)}"></span><span style="font-size:11px; color:${getEngineerColor(eng)};">${escapeHtml(abbreviateName(eng.name))}</span></span>`
       : `<span class="editable-empty">+ assign</span>`;
     const range = t.start && t.end ? `${formatShortDate(t.start)}–${formatShortDate(t.end)}` : '';
     const tStatus = getStatus(t.statusId) || getStatus('st_notstarted');
@@ -3171,7 +3615,7 @@ function renderGanttSideRow(row) {
     return `
       <div class="row">
         <div class="row-side indent-2 ${sel}" data-type="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}">
-          ${wrap('name', `<button class="row-delete-btn" data-delete="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" title="Delete task">×</button><span class="expand-icon placeholder">·</span><span class="name-text" data-rename="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" style="color: var(--text-dim); font-size: 11px;" title="Click to open · double-click to rename">${escapeHtml(t.name || '(unnamed task)')}<span class="rename-edit-icon" title="Rename">✏️</span></span>`)}
+          ${wrap('name', `<span class="expand-icon placeholder">·</span><span class="name-text" data-rename="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" style="color: var(--text-dim); font-size: 11px;" title="Click to open · double-click to rename">${escapeHtml(t.name || '(unnamed task)')}<span class="rename-edit-icon" title="Rename">✏️</span></span>`)}
           ${wrap('client', '')}
           ${wrap('mgr', '')}
           ${wrap('assign', `<span class="editable-cell" data-edit-cell="t_assignee" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" title="Click to change assignee">${assignCell}</span>`)}
@@ -3291,12 +3735,17 @@ function attachGanttEvents() {
       const mid = el.dataset.milestoneId;
       if (t === 'project') {
         const p = getProject(pid);
-        p.expanded = (p.expanded === false) ? true : false;
+        const newVal = !(p.expanded);
+        p.expanded = newVal;
+        // Per-viewer view state — don't sync to others
+        setExpanded('project', pid, newVal);
       } else if (t === 'milestone') {
         const m = getMilestone(pid, mid);
-        m.expanded = !m.expanded;
+        const newVal = !m.expanded;
+        m.expanded = newVal;
+        setExpanded('milestone', mid, newVal);
       }
-      saveData();
+      // No saveData() — expand/collapse is local only
       renderGantt();
     });
   });
@@ -3472,14 +3921,22 @@ function attachGanttEvents() {
         col.width = Math.max(60, Math.min(500, startW + dx));
         // immediate visual feedback without re-render
         document.querySelectorAll(`.side-col-${key}`).forEach(el => { el.style.width = col.width + 'px'; });
-        const sh = $('#sideHeader'); if (sh) sh.style.width = totalSideWidth() + 'px';
-        const sb = $('#ganttSideScroll'); if (sb) sb.style.width = totalSideWidth() + 'px';
+        // Inner content gets the full column-sum width; outer container uses
+        // the user's visible-width preference (clipping any overflow).
+        const inner = document.querySelectorAll('.gantt-side-header-content, .gantt-side-body-inner');
+        inner.forEach(el => { el.style.width = totalSideWidth() + 'px'; });
+        const visW = visibleSideWidth();
+        const sh = $('#sideHeader'); if (sh) sh.style.width = visW + 'px';
+        const sb = $('#ganttSideScroll'); if (sb) sb.style.width = visW + 'px';
       };
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
         handle.classList.remove('active');
-        saveData();
+        // Column widths are per-viewer — save to user prefs only, not to
+        // the shared schedule document.
+        saveLocal();
+        scheduleUserPrefsSync();
         renderGantt();
       };
       document.addEventListener('mousemove', onMove);
@@ -3624,6 +4081,7 @@ function closePopup() {
   const p = $('#activePopup');
   if (p) p.remove();
   document.removeEventListener('click', closePopupOnOutsideClick, true);
+  flushPendingSnapshotIfIdle();
 }
 function closePopupOnOutsideClick(e) {
   const p = $('#activePopup');
@@ -3672,8 +4130,8 @@ function buildEngineerSearchableList(currentValue, isMulti, onSelect) {
         const isSelected = isMulti ? (currentValue || []).includes(e.id) : (currentValue === e.id);
         items += `<div class="popup-menu-item ${isSelected ? 'selected' : ''}" data-eng-id="${e.id}">
           <span class="popup-checkbox">${isSelected ? '✓' : ''}</span>
-          <span class="eng-dot" style="background:${e.color}"></span>
-          <span style="color:${e.color}">${escapeHtml(e.name)}</span>
+          <span class="eng-dot" style="background:${getEngineerColor(e)}"></span>
+          <span style="color:${getEngineerColor(e)}">${escapeHtml(e.name)}</span>
           <span style="color:var(--text-faint); font-size:10px; margin-left:auto;">${e.role}</span>
         </div>`;
       }
@@ -3753,8 +4211,8 @@ function openAssigneesPopup(anchor, projectId, milestoneId) {
         const isSelected = (m.assigneeIds || []).includes(e.id);
         itemsHtml += `<div class="popup-menu-item ${isSelected ? 'selected' : ''}" data-eng-id="${e.id}">
           <span class="popup-checkbox">${isSelected ? '✓' : ''}</span>
-          <span class="eng-dot" style="background:${e.color}"></span>
-          <span style="color:${e.color}">${escapeHtml(e.name)}</span>
+          <span class="eng-dot" style="background:${getEngineerColor(e)}"></span>
+          <span style="color:${getEngineerColor(e)}">${escapeHtml(e.name)}</span>
           <span style="color:var(--text-faint); font-size:10px; margin-left:auto;">${e.role}</span>
         </div>`;
       }
@@ -4348,42 +4806,52 @@ function handleSelectClick(item) {
 function attachSideResizer() {
   const handle = $('#sideResizer');
   if (!handle) return;
-  // Always resize the LAST visible column (the rightmost one), so the side
-  // panel boundary lines up exactly. This avoids the "sidebar jumps" glitch
-  // that happened when STATE.sidePanelWidth got out of sync with the sum of
-  // column widths.
+  // The side resizer changes only how much of the side panel is *visible*.
+  // Column widths themselves stay put — when the user shrinks the panel,
+  // the rightmost columns are clipped behind the Gantt area; when they
+  // expand it back, those columns re-emerge at their original sizes.
   handle.addEventListener('mousedown', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const visible = getVisibleColumns();
-    if (visible.length === 0) return;
-    const lastKey = visible[visible.length - 1].key;
-    const col = STATE.columnSettings[lastKey];
-    if (!col) return;
     const startX = e.clientX;
-    const startW = col.width;
+    const total = totalSideWidth();
+    const startVis = STATE.sidePanelVisibleWidth == null ? total : STATE.sidePanelVisibleWidth;
     handle.classList.add('active');
 
-    const applyWidth = (newW) => {
-      col.width = Math.max(60, Math.min(500, newW));
-      document.querySelectorAll(`.side-col-${lastKey}`).forEach(el => { el.style.width = col.width + 'px'; });
-      const sh = $('#sideHeader'); if (sh) sh.style.width = totalSideWidth() + 'px';
-      const sb = $('#ganttSideScroll'); if (sb) sb.style.width = totalSideWidth() + 'px';
+    const apply = (newVis) => {
+      // Clamp: at minimum show ~60px (still leaves a sliver of name column),
+      // at max go up to the full column-sum width (any wider has no effect
+      // since there's no more content to reveal).
+      newVis = Math.max(60, Math.min(total, newVis));
+      STATE.sidePanelVisibleWidth = newVis;
+      const sh = $('#sideHeader'); if (sh) sh.style.width = newVis + 'px';
+      const sb = $('#ganttSideScroll'); if (sb) sb.style.width = newVis + 'px';
     };
 
     const onMove = (ev) => {
       const dx = ev.clientX - startX;
-      applyWidth(startW + dx);
+      apply(startVis + dx);
     };
     const onUp = () => {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       handle.classList.remove('active');
-      saveData();
-      renderGantt();
+      // Persist locally + sync to user prefs (per-viewer, not shared)
+      saveLocal();
+      scheduleUserPrefsSync();
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
+  });
+
+  // Double-click to reset to full size (show all columns)
+  handle.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    STATE.sidePanelVisibleWidth = null;
+    saveLocal();
+    scheduleUserPrefsSync();
+    renderGantt();
   });
 }
 
@@ -4608,7 +5076,7 @@ function renderProjectDetail(pid) {
   const historyHtml = (p.history || []).map(h => {
     const byEng = h.byId ? getEngineer(h.byId) : null;
     const byPill = byEng
-      ? `<span class="history-by" style="background:${byEng.color}33; color:${byEng.color};">${escapeHtml(byEng.name)}</span>`
+      ? `<span class="history-by" style="background:${getEngineerColor(byEng)}33; color:${getEngineerColor(byEng)};">${escapeHtml(byEng.name)}</span>`
       : (h.by ? `<span class="history-by" style="background:var(--panel-2); color:var(--text-dim);">${escapeHtml(h.by)}</span>` : '<span class="history-anon">(anonymous)</span> ');
     return `
       <div class="history-item">
@@ -4639,7 +5107,20 @@ function renderProjectDetail(pid) {
       </div>
       <div class="field-group">
         <label class="field-label">Client</label>
-        <input class="field-input" type="text" data-edit="client" value="${escapeHtml(eff.client || '')}" />
+        <input class="field-input" type="text" data-edit="client" list="clientSuggestionsDetail" autocomplete="off" value="${escapeHtml(eff.client || '')}" />
+        <datalist id="clientSuggestionsDetail">
+          ${(() => {
+            const seen = new Set();
+            for (const p of STATE.data.projects) {
+              const c = (p.client || '').trim();
+              if (c && !seen.has(c.toLowerCase())) seen.add(c.toLowerCase());
+            }
+            const all = [...seen].map(k => {
+              return STATE.data.projects.find(p => (p.client || '').toLowerCase() === k)?.client || k;
+            });
+            return all.map(c => `<option value="${escapeHtml(c)}">`).join('');
+          })()}
+        </datalist>
       </div>
       <div class="field-row">
         <div class="field-group">
@@ -4685,7 +5166,7 @@ function renderMilestoneDetail(pid, mid) {
   const assigneesHtml = assigneeIds.map(id => {
     const e = getEngineer(id);
     if (!e) return '';
-    return `<span class="assignee-chip" style="border-color:${e.color};"><span class="eng-dot" style="background:${e.color}"></span>${escapeHtml(e.name)}<span class="remove" data-action="remove-assignee" data-eng-id="${id}">×</span></span>`;
+    return `<span class="assignee-chip" style="border-color:${getEngineerColor(e)};"><span class="eng-dot" style="background:${getEngineerColor(e)}"></span>${escapeHtml(e.name)}<span class="remove" data-action="remove-assignee" data-eng-id="${id}">×</span></span>`;
   }).join('');
 
   const availableEngs = STATE.data.engineers.filter(e => !assigneeIds.includes(e.id));
@@ -4697,7 +5178,7 @@ function renderMilestoneDetail(pid, mid) {
     const e = getEngineer(t.assigneeId);
     return `
       <div class="child-item" data-action="open-task" data-task-id="${t.id}">
-        <span class="child-item-name">${t.name ? escapeHtml(t.name) : (e ? `<span class="eng-dot" style="background:${e.color}"></span>${escapeHtml(e.name)}` : '<span style="color:var(--text-faint);">Unnamed task</span>')}</span>
+        <span class="child-item-name">${t.name ? escapeHtml(t.name) : (e ? `<span class="eng-dot" style="background:${getEngineerColor(e)}"></span>${escapeHtml(e.name)}` : '<span style="color:var(--text-faint);">Unnamed task</span>')}</span>
         <span class="child-item-date">${t.start ? formatShortDate(t.start) : '?'} → ${t.end ? formatShortDate(t.end) : '?'}</span>
       </div>`;
   }).join('') || '<div style="color:var(--text-faint); font-size:11px;">No tasks yet</div>';
@@ -4952,35 +5433,61 @@ function handleDetailAction(action, el) {
     return;
   }
   if (action === 'delete-project') {
-    if (!confirm('Delete this project and all its milestones? This cannot be undone.')) return;
-    STATE.data.projects = STATE.data.projects.filter(p => p.id !== projectId);
+    const p = getProject(projectId);
+    if (!p) return;
+    if (!canDeleteProject(p, true)) return;
+    const milestoneCount = (p.milestones || []).length;
+    const taskCount = (p.milestones || []).reduce((n, m) => n + (m.tasks || []).length, 0);
+    const detail = milestoneCount > 0
+      ? ` Includes ${milestoneCount} milestone${milestoneCount === 1 ? '' : 's'}${taskCount > 0 ? ` and ${taskCount} task${taskCount === 1 ? '' : 's'}` : ''}.`
+      : '';
+    if (!confirm(`Move "${p.name}" to Trash?${detail}\n\nIt can be restored from Settings → Trash for ${TRASH_DAYS} days.`)) return;
+    captureUndo(`delete project "${p.name}"`, { type: 'projectsList' });
+    moveToTrash('project', p, { projectId: p.id, projectName: p.name });
+    STATE.data.projects = STATE.data.projects.filter(x => x.id !== projectId);
     discardEdits();
     saveData();
     STATE.selectedItem = null;
     renderAll();
+    toast(`Moved "${p.name}" to Trash. Cmd/Ctrl+Z to undo.`, 'success');
     return;
   }
   if (action === 'delete-milestone') {
-    if (!confirm('Delete this milestone?')) return;
     const p = getProject(projectId);
     const m = getMilestone(projectId, milestoneId);
+    if (!p || !m) return;
+    if (!canDeleteMilestone(p, m, true)) return;
+    const taskCount = (m.tasks || []).length;
+    const detail = taskCount > 0 ? ` Includes ${taskCount} task${taskCount === 1 ? '' : 's'}.` : '';
+    if (!confirm(`Move milestone "${m.name}" to Trash?${detail}\n\nIt can be restored for ${TRASH_DAYS} days.`)) return;
+    captureUndo(`delete milestone "${m.name}"`, { type: 'milestonesList', projectId: p.id });
+    moveToTrash('milestone', m, { projectId: p.id, projectName: p.name, milestoneId: m.id, milestoneName: m.name });
     p.milestones = p.milestones.filter(x => x.id !== milestoneId);
     logHistory(projectId, `Deleted milestone "${m.name}"`);
     discardEdits();
     saveData();
     STATE.selectedItem = { type: 'project', projectId };
     renderAll();
+    toast(`Moved "${m.name}" to Trash.`, 'success');
     return;
   }
   if (action === 'delete-task') {
-    if (!confirm('Delete this task?')) return;
+    const p = getProject(projectId);
     const m = getMilestone(projectId, milestoneId);
-    m.tasks = m.tasks.filter(t => t.id !== taskId);
+    if (!p || !m) return;
+    if (!canDeleteMilestone(p, m, true)) return;
+    const t = (m.tasks || []).find(x => x.id === taskId);
+    if (!t) return;
+    if (!confirm(`Move task to Trash?\n\nIt can be restored for ${TRASH_DAYS} days.`)) return;
+    captureUndo(`delete task`, { type: 'tasksList', projectId, milestoneId });
+    moveToTrash('task', t, { projectId, projectName: p.name, milestoneId, milestoneName: m.name });
+    m.tasks = m.tasks.filter(x => x.id !== taskId);
     logHistory(projectId, `Deleted a task from "${m.name}"`);
     discardEdits();
     saveData();
     STATE.selectedItem = { type: 'milestone', projectId, milestoneId };
     renderAll();
+    toast('Moved to Trash.', 'success');
     return;
   }
 }
@@ -5096,13 +5603,22 @@ function renderCalDay(date, otherMonth, eventsByDate) {
   const isWknd = date.getDay() === 0 || date.getDay() === 6;
   const events = eventsByDate[ds] || [];
   const eventsHtml = events.map(e => {
-    const cls = e.kind === 'task' ? 'task' : '';
+    const isMilestone = e.kind !== 'task';
+    const cls = isMilestone ? 'milestone' : 'task';
+    // Milestone events use the user's chosen deadline color (set in
+    // Settings, stored locally per browser). Tasks still use the
+    // engineer/status color at low alpha so they sit quietly.
+    const DEADLINE_BG = STATE.deadlineColors.bg;
+    const DEADLINE_FG = STATE.deadlineColors.fg;
+    const bg = isMilestone ? DEADLINE_BG : `${e.color}22`;
+    const fg = isMilestone ? DEADLINE_FG : e.color;
+    const borderColor = isMilestone ? DEADLINE_BG : e.color;
     return `<div class="cal-event ${cls}"
-      data-type="${e.kind === 'task' ? 'task' : 'milestone'}"
+      data-type="${isMilestone ? 'milestone' : 'task'}"
       data-project-id="${e.projectId}"
       data-milestone-id="${e.milestoneId}"
       ${e.taskId ? `data-task-id="${e.taskId}"` : ''}
-      style="background: ${e.color}33; border-left-color: ${e.color}; color: ${e.color};"
+      style="background: ${bg}; border-left-color: ${borderColor}; color: ${fg};"
       title="${escapeHtml(e.tooltip)}">${escapeHtml(e.label)}</div>`;
   }).join('');
   return `
@@ -5120,7 +5636,7 @@ function collectCalendarEvents() {
     const mgr = getEngineer(p.managerId);
     // [Manager] tag replaces the old [Category] tag — managers are more useful
     // at a glance for office staffing/workload context.
-    const mgrTag = mgr ? `[${mgr.name}] ` : '';
+    const mgrTag = mgr ? `[${abbreviateName(mgr.name)}] ` : '';
     // Project number prefix (e.g. "#24-105 Project Name")
     const projLabel = (p.number ? `${p.number} ` : '') + p.name;
 
@@ -5130,9 +5646,10 @@ function collectCalendarEvents() {
 
       if (STATE.showMilestones && m.dueDate) {
         const color = getColorFor(m, 'milestone');
-        const engNames = (m.assigneeIds || []).map(id => { const e = getEngineer(id); return e ? e.name : ''; }).filter(Boolean).join(', ');
-        const label = `◆ ${projLabel} — ${mgrTag}${m.name}${engNames ? ' (' + engNames + ')' : ''}`;
-        const tooltip = `${projLabel}\n${mgr ? 'Manager: ' + mgr.name + '\n' : ''}${cat ? cat.name + ' · ' : ''}${m.name}\nDue: ${m.dueDate}${engNames ? '\nAssignees: ' + engNames : ''}`;
+        const engNames = (m.assigneeIds || []).map(id => { const e = getEngineer(id); return e ? abbreviateName(e.name) : ''; }).filter(Boolean).join(', ');
+        const engNamesFull = (m.assigneeIds || []).map(id => { const e = getEngineer(id); return e ? e.name : ''; }).filter(Boolean).join(', ');
+        const label = `${projLabel} — ${mgrTag}${m.name}${engNames ? ' (' + engNames + ')' : ''}`;
+        const tooltip = `${projLabel}\n${mgr ? 'Manager: ' + mgr.name + '\n' : ''}${cat ? cat.name + ' · ' : ''}${m.name}\nDue: ${m.dueDate}${engNamesFull ? '\nAssignees: ' + engNamesFull : ''}`;
         events.push({
           date: m.dueDate, kind: 'milestone', label, tooltip, color,
           projectId: p.id, milestoneId: m.id,
@@ -5145,11 +5662,12 @@ function collectCalendarEvents() {
           const end = parseDate(tk.end);
           const days = daysBetween(start, end);
           const eng = getEngineer(tk.assigneeId);
-          const color = eng ? eng.color : '#5a6573';
-          const engLabel = eng ? eng.name : 'Unassigned';
+          const color = getEngineerColor(eng);
+          const engLabel = eng ? abbreviateName(eng.name) : 'Unassigned';
+          const engLabelFull = eng ? eng.name : 'Unassigned';
           const taskLabel = tk.name || engLabel;
-          const label = `${projLabel} — ${mgrTag}${m.name} · ${taskLabel}${eng && tk.name ? ' (' + eng.name + ')' : ''}`;
-          const tooltip = `${projLabel}\n${mgr ? 'Manager: ' + mgr.name + '\n' : ''}${cat ? cat.name + ' · ' : ''}${m.name}\nTask: ${taskLabel}\n${engLabel}\n${tk.start} – ${tk.end}`;
+          const label = `${projLabel} — ${mgrTag}${m.name} · ${taskLabel}${eng && tk.name ? ' (' + engLabel + ')' : ''}`;
+          const tooltip = `${projLabel}\n${mgr ? 'Manager: ' + mgr.name + '\n' : ''}${cat ? cat.name + ' · ' : ''}${m.name}\nTask: ${taskLabel}\n${engLabelFull}\n${tk.start} – ${tk.end}`;
           for (let i = 0; i <= days; i++) {
             const d = addDays(start, i);
             events.push({
@@ -5300,7 +5818,7 @@ function renderMyWork() {
     <div style="display:flex; align-items:baseline; justify-content:space-between; margin-bottom:16px;">
       <div>
         <h2 style="font-family: Georgia, serif; font-size: 22px; font-weight: 400;">
-          <span style="color:${eng.color}">${escapeHtml(eng.name)}</span>'s Work
+          <span style="color:${getEngineerColor(eng)}">${escapeHtml(eng.name)}</span>'s Work
         </h2>
         <div style="font-size: 11px; color: var(--text-faint); margin-top: 2px;">${totalCount} active milestone${totalCount === 1 ? '' : 's'}</div>
       </div>
@@ -5477,8 +5995,8 @@ function renderWorkload() {
       const totalTasks = counts[e.id].reduce((a, b) => a + b, 0);
       sideBodyHtml += `
         <div class="workload-row-name" data-eng-id="${e.id}">
-          <span class="eng-dot" style="background:${e.color}; width:10px; height:10px;"></span>
-          <span style="color:${e.color}">${escapeHtml(e.name)}</span>
+          <span class="eng-dot" style="background:${getEngineerColor(e)}; width:10px; height:10px;"></span>
+          <span style="color:${getEngineerColor(e)}">${escapeHtml(e.name)}</span>
           <span style="color:var(--text-faint); font-size:10px; margin-left:auto;">${totalTasks}d</span>
         </div>
       `;
@@ -5619,7 +6137,7 @@ function openNewProjectModal() {
   const me = STATE.data.currentUserId ? getEngineer(STATE.data.currentUserId) : null;
   const meDisplay = me
     ? `<div style="display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--panel-2); border:1px solid var(--border-strong); border-radius:4px;">
-         <span class="eng-dot" style="background:${me.color}"></span>
+         <span class="eng-dot" style="background:${getEngineerColor(me)}"></span>
          <span style="flex:1;">${escapeHtml(me.name)}</span>
          <span style="font-size:10px; color:var(--text-faint); text-transform:uppercase;">${escapeHtml(me.role)}</span>
        </div>`
@@ -5645,7 +6163,32 @@ function openNewProjectModal() {
           </div>
           <div class="field-group">
             <label class="field-label">Client</label>
-            <input class="field-input" type="text" id="newProjClient" placeholder="e.g., DSA · ABC Hospital" />
+            <input class="field-input" type="text" id="newProjClient" list="clientSuggestions" placeholder="e.g., DSA · ABC Hospital" autocomplete="off" />
+            <datalist id="clientSuggestions">
+              ${(() => {
+                // Build suggestions from existing clients (most-used first) plus
+                // a few common ones for K-12 / DSA work. Dedup case-insensitively.
+                const seen = new Set();
+                const counts = {};
+                for (const p of STATE.data.projects) {
+                  const c = (p.client || '').trim();
+                  if (!c) continue;
+                  const key = c.toLowerCase();
+                  counts[key] = (counts[key] || 0) + 1;
+                  if (!seen.has(key)) seen.add(key);
+                }
+                const COMMON = [
+                  'Los Angeles USD', 'San Diego USD', 'Long Beach USD', 'Capistrano USD',
+                  'Irvine USD', 'Orange USD', 'Saddleback Valley USD', 'Tustin USD',
+                  'Santa Ana USD', 'Newport-Mesa USD',
+                ];
+                const all = Object.keys(counts)
+                  .sort((a, b) => counts[b] - counts[a])
+                  .map(k => STATE.data.projects.find(p => (p.client || '').toLowerCase() === k)?.client || k);
+                for (const c of COMMON) if (!seen.has(c.toLowerCase())) all.push(c);
+                return all.map(c => `<option value="${escapeHtml(c)}">`).join('');
+              })()}
+            </datalist>
           </div>
           <div class="field-group">
             <label class="field-label">Manager (you, as creator)</label>
@@ -5670,6 +6213,22 @@ function createProject() {
   if (!name) { toast('Name required', 'error'); return; }
   const number = $('#newProjNumber').value.trim();
   const client = $('#newProjClient').value.trim();
+
+  // Duplicate detection — warn if a project with the same number or the
+  // same name already exists. Lets the user back out before creating
+  // accidental duplicates from typos or simultaneous entries.
+  const dupByNumber = number ? STATE.data.projects.find(p => (p.number || '').trim().toLowerCase() === number.toLowerCase()) : null;
+  const dupByName = STATE.data.projects.find(p => p.name.trim().toLowerCase() === name.toLowerCase());
+  if (dupByNumber || dupByName) {
+    const dup = dupByNumber || dupByName;
+    const reason = dupByNumber ? `project number "${number}"` : `project name "${name}"`;
+    const owner = getEngineer(dup.createdBy) || getEngineer(dup.managerId);
+    const ownerNote = owner ? ` (owned by ${owner.name})` : '';
+    if (!confirm(`A project with the same ${reason} already exists${ownerNote}.\n\nCreate this one anyway?`)) {
+      return;
+    }
+  }
+
   // The creator is always the project manager — owners are inseparable from
   // creation per the team's policy. The Manager field in the modal is shown
   // for clarity but cannot deviate from the current user.
@@ -5700,7 +6259,32 @@ function createProject() {
   toast('Project created', 'success');
 }
 
-function closeModal() { $('#modalRoot').innerHTML = ''; }
+function closeModal() {
+  $('#modalRoot').innerHTML = '';
+  flushPendingSnapshotIfIdle();
+}
+
+// If we have a deferred Firestore snapshot waiting and the user has fully
+// stopped interacting, apply it now. Used after popup/modal close and on
+// blur. Wrapped in setTimeout so any focus that's transferring (e.g. closing
+// a popup that puts focus back into a parent input) settles first.
+function flushPendingSnapshotIfIdle() {
+  if (!STATE._pendingSnapshot && !STATE._pendingUserPrefs) return;
+  setTimeout(() => {
+    if (isUserActivelyTyping()) return;
+    if (STATE._pendingSnapshot) {
+      const snap = STATE._pendingSnapshot;
+      STATE._pendingSnapshot = null;
+      applyIncomingSnapshot(snap);
+    }
+    if (STATE._pendingUserPrefs) {
+      const p = STATE._pendingUserPrefs;
+      STATE._pendingUserPrefs = null;
+      applyUserPrefsPayload(p);
+      renderAll();
+    }
+  }, 50);
+}
 
 // Print dialog: pick paper size + which view, then print using a CSS @page rule.
 function openPrintDialog() {
@@ -5836,6 +6420,23 @@ function openSettings() {
     </div>
   `).join('');
 
+  // Personal color overrides — what THIS browser sees for each teammate.
+  // The shared engineer color (above) is what others see; this lets the
+  // current user pick a different color just for their own view.
+  const colorOverrideHtml = STATE.data.engineers.map(e => {
+    const ovr = STATE.colorOverrides[e.id];
+    const effective = ovr || e.color;
+    const isOverridden = !!ovr;
+    return `
+      <div class="engineer-row">
+        <span class="color-swatch" style="background:${effective}; ${isOverridden ? 'box-shadow: 0 0 0 2px var(--accent);' : ''}" title="${isOverridden ? 'Custom color (only you see this)' : 'Default color (shared)'}"></span>
+        <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(e.name)} <span style="color:var(--text-faint); font-size:10px;">${escapeHtml(e.role)}</span></span>
+        <input type="color" data-color-override-eng-id="${e.id}" value="${effective}" style="width:30px; padding:0; height:24px;" title="Pick a color for your view" />
+        <button class="btn small" data-color-override-reset="${e.id}" ${isOverridden ? '' : 'disabled'} title="Reset to default (shared) color">Reset</button>
+      </div>
+    `;
+  }).join('');
+
   const statusesHtml = STATE.data.statuses.map(s => `
     <div class="engineer-row">
       <span class="color-swatch" style="background:${s.color}"></span>
@@ -5888,6 +6489,39 @@ function openSettings() {
             <button class="btn small" onclick="addEngineer()">+ Add Member</button>
           </div>
           <div class="engineers-list" id="engsList">${engsHtml || '<div style="color:var(--text-faint);">No team members yet</div>'}</div>
+
+          <div class="section-title">
+            <span>My Color Overrides</span>
+            <button class="btn small" onclick="resetAllColorOverrides()" ${Object.keys(STATE.colorOverrides).length === 0 ? 'disabled' : ''}>Reset All</button>
+          </div>
+          <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">
+            Pick the colors <strong style="color:var(--text);">you</strong> want to see for each teammate. These overrides are stored only in this browser — other users keep seeing the team's shared colors. Click Reset to go back to the shared color.
+          </div>
+          <div class="engineers-list" id="colorOverrideList">${colorOverrideHtml}</div>
+
+          <div class="section-title">
+            <span>Calendar Deadline Color</span>
+            <button class="btn small" onclick="resetDeadlineColorAndRefresh()" ${(STATE.deadlineColors.bg === DEFAULT_DEADLINE_BG && STATE.deadlineColors.fg === DEFAULT_DEADLINE_FG) ? 'disabled' : ''}>Reset</button>
+          </div>
+          <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">
+            The background and text colors used for milestone deadlines on the calendar view. Stored only in this browser.
+          </div>
+          <div class="engineer-row">
+            <span class="color-swatch" id="deadlinePreviewSwatch" style="background:${STATE.deadlineColors.bg}; color:${STATE.deadlineColors.fg}; width:auto; height:auto; padding:4px 10px; border-radius:3px; font-weight:700; font-size:10px;">◆ Sample Deadline</span>
+            <span style="flex:1; color:var(--text-faint); font-size:10px;">Background</span>
+            <input type="color" id="deadlineBgInput" value="${STATE.deadlineColors.bg}" style="width:30px; padding:0; height:24px;" />
+            <span style="color:var(--text-faint); font-size:10px;">Text</span>
+            <input type="color" id="deadlineFgInput" value="${STATE.deadlineColors.fg}" style="width:30px; padding:0; height:24px;" />
+          </div>
+          <div style="font-size:10px; color:var(--text-faint); margin-bottom:14px;">
+            Quick presets:
+            <button class="btn small deadline-preset" data-bg="#a8554a" data-fg="#fbeee5" style="margin-left:6px;">Terracotta</button>
+            <button class="btn small deadline-preset" data-bg="#8e6f3a" data-fg="#fbeee5">Mustard</button>
+            <button class="btn small deadline-preset" data-bg="#5a7a8a" data-fg="#fbeee5">Slate Blue</button>
+            <button class="btn small deadline-preset" data-bg="#6e8856" data-fg="#fbeee5">Olive</button>
+            <button class="btn small deadline-preset" data-bg="#7a4a6e" data-fg="#fbeee5">Plum</button>
+            <button class="btn small deadline-preset" data-bg="#3d4a5a" data-fg="#d4a574">Charcoal</button>
+          </div>
 
           <div class="section-title">
             <span>Categories</span>
@@ -5968,7 +6602,101 @@ function openSettings() {
       </div>
     </div>
   `;
+  // Wire personal color override pickers — these update the user's local
+  // preference immediately (no Save needed) since overrides are local-only.
+  setTimeout(() => {
+    $$('input[data-color-override-eng-id]').forEach(input => {
+      input.addEventListener('input', (e) => {
+        const engId = input.dataset.colorOverrideEngId;
+        setEngineerColorOverride(engId, input.value);
+        // Update the swatch in this row visually
+        const swatch = input.closest('.engineer-row')?.querySelector('.color-swatch');
+        if (swatch) {
+          swatch.style.background = input.value;
+          swatch.style.boxShadow = '0 0 0 2px var(--accent)';
+        }
+        const reset = input.closest('.engineer-row')?.querySelector('[data-color-override-reset]');
+        if (reset) reset.disabled = false;
+      });
+      // 'change' fires when the picker is closed — at that point also re-render
+      // the rest of the app so dots/badges/charts update with the new color.
+      input.addEventListener('change', () => {
+        renderAll();
+      });
+    });
+    $$('button[data-color-override-reset]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        const engId = btn.dataset.colorOverrideReset;
+        clearEngineerColorOverride(engId);
+        const eng = getEngineer(engId);
+        const row = btn.closest('.engineer-row');
+        const swatch = row?.querySelector('.color-swatch');
+        const picker = row?.querySelector('input[type="color"]');
+        if (swatch && eng) { swatch.style.background = eng.color; swatch.style.boxShadow = 'none'; }
+        if (picker && eng) { picker.value = eng.color; }
+        btn.disabled = true;
+        renderAll();
+      });
+    });
+
+    // Deadline color pickers + preset buttons
+    const deadlineBg = $('#deadlineBgInput');
+    const deadlineFg = $('#deadlineFgInput');
+    const previewSwatch = $('#deadlinePreviewSwatch');
+    const updatePreview = () => {
+      if (previewSwatch) {
+        previewSwatch.style.background = deadlineBg.value;
+        previewSwatch.style.color = deadlineFg.value;
+      }
+    };
+    if (deadlineBg && deadlineFg) {
+      deadlineBg.addEventListener('input', () => {
+        saveDeadlineColor(deadlineBg.value, null);
+        updatePreview();
+      });
+      deadlineFg.addEventListener('input', () => {
+        saveDeadlineColor(null, deadlineFg.value);
+        updatePreview();
+      });
+      // change fires when picker closes — re-render calendar at that point
+      deadlineBg.addEventListener('change', () => renderAll());
+      deadlineFg.addEventListener('change', () => renderAll());
+    }
+    $$('.deadline-preset').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        const bg = btn.dataset.bg;
+        const fg = btn.dataset.fg;
+        saveDeadlineColor(bg, fg);
+        if (deadlineBg) deadlineBg.value = bg;
+        if (deadlineFg) deadlineFg.value = fg;
+        updatePreview();
+        renderAll();
+      });
+    });
+  }, 0);
 }
+
+function resetAllColorOverrides() {
+  if (Object.keys(STATE.colorOverrides).length === 0) return;
+  if (!confirm('Reset all color overrides back to the team\'s shared colors? (Only affects your view.)')) return;
+  clearAllColorOverrides();
+  closeModal();
+  openSettings();
+  renderAll();
+  toast('Reset to shared colors', 'success');
+}
+window.resetAllColorOverrides = resetAllColorOverrides;
+
+function resetDeadlineColorAndRefresh() {
+  resetDeadlineColors();
+  closeModal();
+  openSettings();
+  renderAll();
+  toast('Deadline color reset', 'success');
+}
+window.resetDeadlineColorAndRefresh = resetDeadlineColorAndRefresh;
 
 function saveSettings() {
   $$('#engsList input, #engsList select').forEach(el => {
@@ -6650,6 +7378,24 @@ async function init() {
   $('#exportIcsBtn').addEventListener('click', openIcsExport);
   $('#exportIcsBtn2').addEventListener('click', openIcsExport);
   $('#todayBtn').addEventListener('click', scrollTodayToLeft);
+  $('#expandAllBtn').addEventListener('click', () => {
+    // Expand/collapse state is per-viewer (see view-state isolation below),
+    // so we don't sync this. Just update locally and re-render.
+    for (const p of STATE.data.projects) {
+      p.expanded = true;
+      for (const m of (p.milestones || [])) m.expanded = true;
+    }
+    persistViewState();
+    renderAll();
+  });
+  $('#collapseAllBtn').addEventListener('click', () => {
+    for (const p of STATE.data.projects) {
+      p.expanded = false;
+      for (const m of (p.milestones || [])) m.expanded = false;
+    }
+    persistViewState();
+    renderAll();
+  });
 
   $('#calToday').addEventListener('click', scrollCalendarToToday);
 
@@ -6811,6 +7557,10 @@ async function init() {
   // Initial: today at left
   setTimeout(scrollTodayDefault, 100);
 
+  // Track focused inputs so incoming Firestore syncs don't blow away the
+  // user's typing.
+  attachActiveInputTracker();
+
   // If we don't know who's using this browser yet, ask. Once they pick, the
   // choice is stored in localStorage and persists for that browser/profile.
   if (!STATE.data.currentUserId) {
@@ -6830,7 +7580,7 @@ function promptForUserIdentity() {
 
   const cards = engineers.map(e => `
     <button type="button" class="user-pick-card" data-uid="${e.id}">
-      <span class="eng-dot" style="background:${e.color}; width:14px; height:14px;"></span>
+      <span class="eng-dot" style="background:${getEngineerColor(e)}; width:14px; height:14px;"></span>
       <span style="flex:1; text-align:left;">
         <div style="font-weight:600;">${escapeHtml(e.name)}</div>
         <div style="font-size:10px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.3px;">${escapeHtml(e.role)}</div>
@@ -6864,6 +7614,9 @@ function promptForUserIdentity() {
       closeModal();
       const eng = getEngineer(uid);
       toast(`Signed in as ${eng?.name || 'unknown'}`, 'success');
+      // Re-subscribe to my new identity's prefs so the page picks up my
+      // saved colors / expand state from any other browser I've used.
+      subscribeUserPrefs();
       renderAll();
     });
   });
