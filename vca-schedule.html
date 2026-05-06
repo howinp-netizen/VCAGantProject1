@@ -6406,6 +6406,11 @@ function closeModal() {
   flushPendingSnapshotIfIdle();
 }
 
+// Mount a modal's HTML into the modal root container. Pairs with closeModal.
+function showModal(html) {
+  $('#modalRoot').innerHTML = html;
+}
+
 // If we have a deferred Firestore snapshot waiting and the user has fully
 // stopped interacting, apply it now. Used after popup/modal close and on
 // blur. Wrapped in setTimeout so any focus that's transferring (e.g. closing
@@ -6493,7 +6498,7 @@ function openPrintDialog() {
       </div>
     </div>
   `;
-  showModal(html);
+  $("#modalRoot").innerHTML = html;
   $('#printCancel').addEventListener('click', closeModal);
   $('#printGo').addEventListener('click', () => {
     const paper = document.querySelector('input[name="paperSize"]:checked').value;
@@ -8028,7 +8033,7 @@ function promptForUserIdentity() {
       </div>
     </div>
   `;
-  showModal(html);
+  $("#modalRoot").innerHTML = html;
 
   document.querySelectorAll('.user-pick-card').forEach(btn => {
     btn.addEventListener('click', () => {
