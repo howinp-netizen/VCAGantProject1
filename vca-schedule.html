@@ -1525,11 +1525,13 @@ function subscribeUserPrefs() {
   _userPrefsUnsub = onSnapshot(ref, (snap) => {
     if (!snap.exists()) return;
     if (isUserActivelyTyping()) {
-      // Defer same as project sync — don't blow away in-progress edits
       STATE._pendingUserPrefs = snap.data();
       return;
     }
     applyUserPrefsPayload(snap.data());
+    // The payload may have changed STATE.view (e.g. another browser
+    // switched tabs). Sync the DOM to that.
+    applyViewToDom(STATE.view || 'gantt');
     renderAll();
   });
 }
@@ -2529,6 +2531,21 @@ function milestonePassesFilters(m) {
   return true;
 }
 
+// Task-level filter — used to hide individual tasks that don't match the
+// current filter set. Today the only filter that propagates down to tasks
+// is the engineer ("My Milestones") filter: when active, we hide tasks
+// assigned to other people so the user only sees their own work, even if
+// the parent milestone is shown because it happens to contain a task of
+// theirs alongside others.
+function taskPassesFilters(t) {
+  for (const f of STATE.filters) {
+    if (f.type === 'engineer') {
+      if (t.assigneeId !== f.value) return false;
+    }
+  }
+  return true;
+}
+
 function renderFilterBar() {
   const bar = $('#filterBar');
   bar.querySelectorAll('.filter-pill').forEach(el => el.remove());
@@ -3014,10 +3031,11 @@ function refreshCurrentUserBadge() {
   }
 }
 
-function setView(v) {
-  if (!maybeConfirmDiscard()) return;
-  discardEdits();
-  STATE.view = v;
+// Just the visual side of switching views — set the active tab class,
+// show/hide the right view container and toolbar. Doesn't trigger render
+// or persistence. Used by setView() and during init() to align the DOM
+// with whatever STATE.view was restored from localStorage/userPrefs.
+function applyViewToDom(v) {
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === v));
   $('#ganttView').style.display = v === 'gantt' ? 'flex' : 'none';
   $('#calendarView').style.display = v === 'calendar' ? 'flex' : 'none';
@@ -3028,6 +3046,13 @@ function setView(v) {
   $('#myworkToolbar').style.display = v === 'mywork' ? 'flex' : 'none';
   $('#workloadToolbar').style.display = v === 'workload' ? 'flex' : 'none';
   $('#filterBar').style.display = (v === 'gantt' || v === 'calendar') ? 'flex' : 'none';
+}
+
+function setView(v) {
+  if (!maybeConfirmDiscard()) return;
+  discardEdits();
+  STATE.view = v;
+  applyViewToDom(v);
   renderAll();
   // Persist the chosen view so reopening the app puts the user back where
   // they were (same tab, same filters, etc).
@@ -3573,6 +3598,7 @@ function buildGanttRows() {
         rows.push({ type: 'milestone', project: p, milestone: m });
         if (m.expanded) {
           for (const t of (m.tasks || [])) {
+            if (!taskPassesFilters(t)) continue;
             rows.push({ type: 'task', project: p, milestone: m, task: t });
           }
         }
@@ -3742,6 +3768,7 @@ function renderGanttGridRow(row, min, dayWidth) {
     if (!m.expanded && m.tasks && m.tasks.length > 0) {
       for (const t of m.tasks) {
         if (!t.start || !t.end) continue;
+        if (!taskPassesFilters(t)) continue;
         const tStart = parseDate(t.start);
         const tEnd = parseDate(t.end);
         const left = daysBetween(min, tStart) * dayWidth;
@@ -5737,6 +5764,7 @@ function collectCalendarEvents() {
       if (STATE.showTasks) {
         for (const tk of (m.tasks || [])) {
           if (!tk.start || !tk.end) continue;
+          if (!taskPassesFilters(tk)) continue;
           const start = parseDate(tk.start);
           const end = parseDate(tk.end);
           const days = daysBetween(start, end);
@@ -6370,6 +6398,7 @@ function flushPendingSnapshotIfIdle() {
       const p = STATE._pendingUserPrefs;
       STATE._pendingUserPrefs = null;
       applyUserPrefsPayload(p);
+      applyViewToDom(STATE.view || 'gantt');
       renderAll();
     }
   }, 50);
@@ -6390,116 +6419,418 @@ function forceRefreshFromServer() {
 }
 
 function openPrintDialog() {
+  // Build a preview-first print modal. The user picks paper/orientation/scope
+  // and sees a live preview of how each page will look. When ready, they
+  // click "Open Print Preview" — this opens a new window/tab containing a
+  // self-contained, print-ready HTML document. They can review the pages
+  // in the new window and trigger their browser's print dialog from there
+  // (Ctrl/Cmd+P), which is the most reliable path inside Teams iframes.
   const html = `
-    <div class="modal-content" style="max-width: 480px;">
-      <h2 style="margin-bottom: 16px;">Print Gantt Chart</h2>
-      <div class="field-group" style="margin-bottom: 14px;">
-        <label class="field-label">Paper Size</label>
-        <div style="display:flex; gap:8px;">
-          <label style="flex:1; display:flex; align-items:center; gap:6px; padding:10px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
-            <input type="radio" name="paperSize" value="letter" checked />
-            <div>
-              <div style="font-weight:600;">Letter</div>
-              <div style="font-size:10px; color:var(--text-faint);">8.5 × 11"</div>
+    <div class="modal-content" style="max-width: 900px; width: 90vw;">
+      <h2 style="margin-bottom: 16px;">Print Preview</h2>
+      <div style="display:grid; grid-template-columns: 280px 1fr; gap:16px; align-items:start;">
+        <!-- Left: options -->
+        <div>
+          <div class="field-group" style="margin-bottom: 14px;">
+            <label class="field-label">Paper Size</label>
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              <label style="display:flex; align-items:center; gap:8px; padding:8px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
+                <input type="radio" name="paperSize" value="letter" checked />
+                <div><div style="font-weight:600;">Letter</div><div style="font-size:10px; color:var(--text-faint);">8.5 × 11"</div></div>
+              </label>
+              <label style="display:flex; align-items:center; gap:8px; padding:8px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
+                <input type="radio" name="paperSize" value="tabloid" />
+                <div><div style="font-weight:600;">Tabloid</div><div style="font-size:10px; color:var(--text-faint);">11 × 17"</div></div>
+              </label>
             </div>
-          </label>
-          <label style="flex:1; display:flex; align-items:center; gap:6px; padding:10px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
-            <input type="radio" name="paperSize" value="tabloid" />
-            <div>
-              <div style="font-weight:600;">Tabloid</div>
-              <div style="font-size:10px; color:var(--text-faint);">11 × 17"</div>
+          </div>
+          <div class="field-group" style="margin-bottom: 14px;">
+            <label class="field-label">Orientation</label>
+            <div style="display:flex; gap:6px;">
+              <label style="flex:1; display:flex; align-items:center; gap:6px; padding:8px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
+                <input type="radio" name="orientation" value="landscape" checked /> Landscape
+              </label>
+              <label style="flex:1; display:flex; align-items:center; gap:6px; padding:8px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
+                <input type="radio" name="orientation" value="portrait" /> Portrait
+              </label>
             </div>
-          </label>
+          </div>
+          <div class="field-group" style="margin-bottom: 14px;">
+            <label class="field-label">What to print</label>
+            <select class="field-input" id="printScope">
+              <option value="current">Current view (with filters & zoom)</option>
+              <option value="all">All projects (full timeline)</option>
+            </select>
+          </div>
+          <div style="background: var(--panel-2); padding: 10px 12px; border-radius: 4px; font-size: 11px; color: var(--text-dim); margin-bottom: 14px;">
+            <strong style="color:var(--text);">Tip:</strong> A new window opens with a clean print-ready view. From there press <strong style="color:var(--text);">Ctrl/Cmd + P</strong> and choose the matching paper size in the dialog. Make sure <strong style="color:var(--text);">"Background graphics"</strong> is enabled.
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn" id="printCancel" style="flex:1;">Cancel</button>
+            <button class="btn primary" id="printGo" style="flex:2;">Open Print Preview ↗</button>
+          </div>
         </div>
-      </div>
-      <div class="field-group" style="margin-bottom: 14px;">
-        <label class="field-label">Orientation</label>
-        <div style="display:flex; gap:8px;">
-          <label style="display:flex; align-items:center; gap:6px;"><input type="radio" name="orientation" value="landscape" checked /> Landscape (recommended)</label>
-          <label style="display:flex; align-items:center; gap:6px;"><input type="radio" name="orientation" value="portrait" /> Portrait</label>
+
+        <!-- Right: live preview -->
+        <div>
+          <div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">Page preview <span id="previewPaperLabel">(Letter, Landscape)</span></div>
+          <div id="printPreviewFrame" style="background:#444; border-radius:4px; padding:12px; display:flex; justify-content:center; align-items:flex-start; height:420px; overflow:auto;">
+            <div id="printPreviewPage" style="background:white; box-shadow: 0 4px 16px rgba(0,0,0,0.4); position:relative; transition: width 0.2s, height 0.2s;">
+              <div id="printPreviewContent" style="width:100%; height:100%; padding:8px; box-sizing:border-box; color:#1a1410; font-size:6px; overflow:hidden;"></div>
+            </div>
+          </div>
+          <div style="font-size:10px; color:var(--text-faint); margin-top:6px;">This is a thumbnail. The new window will show the full layout at actual size.</div>
         </div>
-      </div>
-      <div class="field-group" style="margin-bottom: 16px;">
-        <label class="field-label">What to print</label>
-        <select class="field-input" id="printScope">
-          <option value="current">Current view (with current filters and zoom)</option>
-          <option value="all">All projects (light theme, full timeline)</option>
-        </select>
-      </div>
-      <div style="background: var(--panel-2); padding: 10px 12px; border-radius: 4px; font-size: 11px; color: var(--text-dim); margin-bottom: 16px;">
-        <strong style="color:var(--text);">Tip:</strong> In the browser's print dialog, choose the matching paper size and select <strong style="color:var(--text);">"Background graphics"</strong> in More settings so colors print correctly.
-      </div>
-      <div style="display:flex; gap:8px; justify-content:flex-end;">
-        <button class="btn" id="printCancel">Cancel</button>
-        <button class="btn primary" id="printGo">🖨 Open Print Dialog</button>
       </div>
     </div>
   `;
   showModal(html);
+
+  // Live preview rendering
+  const updatePreview = () => {
+    const paper = document.querySelector('input[name="paperSize"]:checked').value;
+    const orient = document.querySelector('input[name="orientation"]:checked').value;
+    const label = `(${paper === 'letter' ? 'Letter' : 'Tabloid'}, ${orient === 'landscape' ? 'Landscape' : 'Portrait'})`;
+    const labelEl = document.getElementById('previewPaperLabel');
+    if (labelEl) labelEl.textContent = label;
+    // Page dimensions (inches → scaled px for thumbnail)
+    const dims = { letter: [8.5, 11], tabloid: [11, 17] }[paper];
+    let w = dims[0], h = dims[1];
+    if (orient === 'landscape') [w, h] = [h, w];
+    // Scale so longest side fits ~380px
+    const scale = 360 / Math.max(w, h);
+    const pxW = Math.round(w * 72 * scale / 72 * 50);  // approximate visual scale
+    const pxH = Math.round(h * 72 * scale / 72 * 50);
+    // Simpler: just use a baseline 50px/in for thumbnail
+    const tW = Math.round(w * 36);
+    const tH = Math.round(h * 36);
+    const page = document.getElementById('printPreviewPage');
+    const content = document.getElementById('printPreviewContent');
+    if (page) {
+      page.style.width = tW + 'px';
+      page.style.height = tH + 'px';
+    }
+    if (content) {
+      content.innerHTML = renderPrintPreviewThumbnail();
+    }
+  };
+  setTimeout(updatePreview, 50);
+  document.querySelectorAll('input[name="paperSize"], input[name="orientation"]').forEach(el => {
+    el.addEventListener('change', updatePreview);
+  });
+
   $('#printCancel').addEventListener('click', closeModal);
   $('#printGo').addEventListener('click', () => {
     const paper = document.querySelector('input[name="paperSize"]:checked').value;
     const orient = document.querySelector('input[name="orientation"]:checked').value;
     const scope = $('#printScope').value;
     closeModal();
-    runPrint(paper, orient, scope);
+    openPrintPreviewWindow(paper, orient, scope);
   });
 }
 
+// Build a tiny thumbnail summary for the modal preview pane. Doesn't try to
+// be pixel-accurate — just shows roughly what content will appear.
+function renderPrintPreviewThumbnail() {
+  const visibleProjects = STATE.data.projects.filter(p => projectPassesFilters(p));
+  const projectCount = visibleProjects.length;
+  const milestoneCount = visibleProjects.reduce((n, p) => n + (p.milestones || []).length, 0);
+  const viewLabel = STATE.view === 'gantt' ? 'Gantt Chart'
+    : STATE.view === 'calendar' ? 'Calendar'
+    : STATE.view === 'mywork' ? 'My Work'
+    : STATE.view === 'workload' ? 'Workload'
+    : 'Schedule';
+  return `
+    <div style="font-weight:700; font-size:8px; border-bottom:1px solid #333; padding-bottom:3px; margin-bottom:4px;">VCA Schedule — ${viewLabel}</div>
+    <div style="font-size:5px; color:#666; margin-bottom:4px;">${new Date().toLocaleDateString()} · ${projectCount} project${projectCount !== 1 ? 's' : ''} · ${milestoneCount} milestone${milestoneCount !== 1 ? 's' : ''}</div>
+    ${visibleProjects.slice(0, 12).map((p, i) => {
+      const mgr = getEngineer(p.managerId);
+      return `
+        <div style="display:flex; gap:3px; margin-bottom:1.5px; align-items:center;">
+          <span style="display:inline-block; width:14px; font-size:5px; color:#888;">${escapeHtml(p.number || '')}</span>
+          <span style="flex:1; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(p.name)}</span>
+          <span style="font-size:5px; color:#666;">${mgr ? escapeHtml(abbreviateName(mgr.name)) : ''}</span>
+          <span style="display:inline-block; height:4px; width:40%; background:#d4a574; border-radius:1px;"></span>
+        </div>
+      `;
+    }).join('')}
+    ${visibleProjects.length > 12 ? `<div style="font-size:5px; color:#888; margin-top:3px;">+${visibleProjects.length - 12} more…</div>` : ''}
+  `;
+}
+
+// Open a new window containing a self-contained, print-ready HTML document.
+// The new window has full access to its own window.print() and its own DOM.
+// Inside Teams the iframe sandbox can block the new-window approach if
+// pop-ups are denied — in that case we fall back to opening the URL in a
+// new tab via Teams' deep link, which always works.
+function openPrintPreviewWindow(paper, orient, scope) {
+  const dims = { letter: [8.5, 11], tabloid: [11, 17] }[paper] || [8.5, 11];
+  let pageW = dims[0], pageH = dims[1];
+  if (orient === 'landscape') [pageW, pageH] = [pageH, pageW];
+
+  const visibleProjects = (scope === 'current')
+    ? STATE.data.projects.filter(p => projectPassesFilters(p))
+    : STATE.data.projects.slice();
+
+  // Compute timeline range
+  let minDate = null, maxDate = null;
+  for (const p of visibleProjects) {
+    for (const m of (p.milestones || [])) {
+      if (m.dueDate) {
+        const d = parseDate(m.dueDate);
+        if (d) {
+          if (!minDate || d < minDate) minDate = d;
+          if (!maxDate || d > maxDate) maxDate = d;
+        }
+      }
+    }
+  }
+  if (!minDate) minDate = today();
+  if (!maxDate) maxDate = addDays(today(), 90);
+  // Pad
+  minDate = addDays(minDate, -7);
+  maxDate = addDays(maxDate, 14);
+  const totalDays = Math.max(1, daysBetween(minDate, maxDate));
+
+  // Title
+  const viewLabel = STATE.view === 'gantt' ? 'Gantt Chart'
+    : STATE.view === 'calendar' ? 'Calendar'
+    : STATE.view === 'mywork' ? 'My Work'
+    : STATE.view === 'workload' ? 'Workload'
+    : 'Schedule';
+
+  // Build page HTML — a static, printable document. Each project becomes a
+  // row with columns (number, name, manager, due) plus a horizontal Gantt
+  // bar. Page break logic is handled by CSS @page-break-inside on rows.
+  const rowsHtml = visibleProjects.map(p => {
+    const mgr = getEngineer(p.managerId);
+    const milestones = (p.milestones || []);
+    const mhtml = milestones.map(m => {
+      if (!m.dueDate) return '';
+      const d = parseDate(m.dueDate);
+      if (!d) return '';
+      const offset = daysBetween(minDate, d);
+      const left = (offset / totalDays) * 100;
+      const cat = STATE.data.categories.find(c => c.id === m.categoryId);
+      const status = STATE.data.statuses.find(s => s.id === m.statusId);
+      return `<div class="ms" style="left:${left}%;" title="${escapeHtml(m.name)} (${m.dueDate})">
+        <span class="ms-dot"></span><span class="ms-label">${escapeHtml(m.name)}</span>
+      </div>`;
+    }).join('');
+    return `
+      <tr class="proj-row">
+        <td class="c-num">${escapeHtml(p.number || '')}</td>
+        <td class="c-name">${escapeHtml(p.name)}</td>
+        <td class="c-client">${escapeHtml(p.client || '')}</td>
+        <td class="c-mgr">${mgr ? escapeHtml(mgr.name) : ''}</td>
+        <td class="c-bar">
+          <div class="bar-track">${mhtml}</div>
+        </td>
+      </tr>
+      ${milestones.length > 0 ? milestones.map(m => {
+        const d = m.dueDate ? parseDate(m.dueDate) : null;
+        const left = d ? (daysBetween(minDate, d) / totalDays) * 100 : 0;
+        const cat = STATE.data.categories.find(c => c.id === m.categoryId);
+        const status = STATE.data.statuses.find(s => s.id === m.statusId);
+        const assignees = (m.assigneeIds || []).map(id => {
+          const e = getEngineer(id); return e ? e.name : '';
+        }).filter(Boolean).join(', ');
+        return `
+        <tr class="ms-row">
+          <td class="c-num"></td>
+          <td class="c-name">  ◆ ${escapeHtml(m.name)}</td>
+          <td class="c-client">${escapeHtml(cat ? cat.name : '')}</td>
+          <td class="c-mgr">${escapeHtml(assignees)}</td>
+          <td class="c-bar">
+            <div class="bar-track">
+              ${d ? `<div class="ms-mark" style="left:${left}%;" title="${m.dueDate}"><span>◆</span><span class="ms-date">${m.dueDate}${status ? ' · ' + escapeHtml(status.name) : ''}</span></div>` : ''}
+            </div>
+          </td>
+        </tr>`;
+      }).join('') : ''}
+    `;
+  }).join('');
+
+  // Month markers above the bar columns
+  const monthMarkers = (() => {
+    let cur = new Date(minDate.getFullYear(), minDate.getMonth(), 1);
+    const out = [];
+    while (cur <= maxDate) {
+      const offset = daysBetween(minDate, cur);
+      if (offset >= 0) {
+        const left = (offset / totalDays) * 100;
+        out.push(`<div class="month-marker" style="left:${left}%;">${cur.toLocaleString('default', { month: 'short' })} ${String(cur.getFullYear()).slice(2)}</div>`);
+      }
+      cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
+    }
+    return out.join('');
+  })();
+
+  const todayOffset = (() => {
+    const t = today();
+    if (t < minDate || t > maxDate) return null;
+    return (daysBetween(minDate, t) / totalDays) * 100;
+  })();
+
+  const docHtml = `<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<title>VCA Schedule — Print Preview</title>
+<style>
+  @page { size: ${pageW}in ${pageH}in; margin: 0.4in; }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { background: #888; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #1a1410; }
+  body { padding: 20px; min-height: 100vh; }
+  .toolbar {
+    position: sticky; top: 0; z-index: 10; background: #1a1410; color: #d4a574;
+    padding: 10px 16px; margin: -20px -20px 20px -20px; display: flex; gap: 12px; align-items: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  }
+  .toolbar h1 { font-size: 14px; font-weight: 600; }
+  .toolbar .info { font-size: 11px; color: #d4a57499; }
+  .toolbar .spacer { flex: 1; }
+  .toolbar button {
+    background: #d4a574; color: #1a1410; border: 0; padding: 6px 14px; border-radius: 3px;
+    font-weight: 600; cursor: pointer; font-size: 12px;
+  }
+  .toolbar button.secondary { background: transparent; color: #d4a574; border: 1px solid #d4a574; }
+
+  .page {
+    background: white; box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    width: ${pageW}in; min-height: ${pageH}in; margin: 0 auto 30px auto;
+    padding: 0.4in; page-break-after: always;
+  }
+  .page:last-child { page-break-after: auto; }
+  .page-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 2px solid #1a1410; padding-bottom: 8px; margin-bottom: 14px;
+  }
+  .page-header h2 { font-size: 14pt; font-weight: 700; }
+  .page-header .meta { font-size: 9pt; color: #666; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 8pt; }
+  thead th {
+    background: #f0e8dc; color: #1a1410; padding: 5px 4px; text-align: left;
+    border-bottom: 1px solid #999; font-weight: 600; font-size: 7pt;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  td { padding: 4px; border-bottom: 1px solid #e0d8cc; vertical-align: middle; }
+  .proj-row td { font-weight: 600; background: #faf6ef; }
+  .ms-row td { font-size: 7.5pt; color: #444; }
+  .ms-row td.c-name { padding-left: 16px; }
+
+  .c-num { width: 72px; color: #888; font-variant-numeric: tabular-nums; }
+  .c-name { width: 28%; }
+  .c-client { width: 14%; color: #666; }
+  .c-mgr { width: 14%; color: #666; }
+  .c-bar { position: relative; padding: 0; }
+
+  .bar-track { position: relative; height: 20px; background: #f5f1ea; border-left: 1px solid #ddd; }
+  .proj-row .bar-track { background: #ede3d2; }
+
+  .month-bar {
+    position: relative; height: 16px; border-bottom: 1px solid #aaa;
+    background: #ede3d2; margin-bottom: 0;
+  }
+  .month-marker {
+    position: absolute; top: 0; bottom: 0;
+    border-left: 1px solid #aaa; padding-left: 3px; font-size: 7pt; color: #666; white-space: nowrap;
+  }
+  .today-line { position: absolute; top: 0; bottom: 0; width: 1.5px; background: #c44; z-index: 5; }
+  .today-line::before {
+    content: 'Today'; position: absolute; top: -10px; left: -16px;
+    font-size: 6pt; color: #c44; background: white; padding: 0 2px;
+  }
+
+  .ms { position: absolute; top: 4px; height: 12px; transform: translateX(-50%); white-space: nowrap; }
+  .ms-dot {
+    display: inline-block; width: 10px; height: 10px; background: #a8554a;
+    transform: rotate(45deg); margin-right: 3px;
+  }
+  .ms-label { display: none; }
+
+  .ms-mark {
+    position: absolute; top: 1px; transform: translateX(-50%); display: flex; align-items: center; gap: 3px;
+    font-size: 7pt; color: #444; white-space: nowrap;
+  }
+  .ms-mark span:first-child { color: #a8554a; font-size: 9pt; }
+  .ms-mark .ms-date { background: rgba(255,255,255,0.85); padding: 0 3px; border-radius: 1px; }
+
+  /* Print mode: hide preview chrome, page-break naturally */
+  @media print {
+    body { background: white; padding: 0; }
+    .toolbar { display: none; }
+    .page {
+      box-shadow: none; margin: 0; padding: 0.4in;
+      width: auto; min-height: auto; page-break-after: always;
+    }
+    .page:last-child { page-break-after: auto; }
+    .proj-row, .ms-row { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+  <div class="toolbar">
+    <h1>VCA Schedule — ${viewLabel}</h1>
+    <span class="info">${pageW}in × ${pageH}in · ${visibleProjects.length} projects</span>
+    <span class="spacer"></span>
+    <button onclick="window.print()">🖨 Print</button>
+    <button class="secondary" onclick="window.close()">Close</button>
+  </div>
+  <div class="page">
+    <div class="page-header">
+      <h2>${viewLabel}</h2>
+      <div class="meta">${new Date().toLocaleDateString()} · ${visibleProjects.length} projects</div>
+    </div>
+    <div class="month-bar">
+      ${monthMarkers}
+      ${todayOffset !== null ? `<div class="today-line" style="left:${todayOffset}%;"></div>` : ''}
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th class="c-num">#</th>
+          <th class="c-name">Project / Milestone</th>
+          <th class="c-client">Client / Phase</th>
+          <th class="c-mgr">Mgr / Assignees</th>
+          <th class="c-bar">Timeline (${minDate.toLocaleDateString()} – ${maxDate.toLocaleDateString()})</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+  </div>
+</body></html>`;
+
+  // Try to open a new window/tab with this HTML inline.
+  const w = window.open('', '_blank', 'width=1100,height=800');
+  if (!w) {
+    // Pop-ups blocked — fallback: write to a Blob URL and try again
+    const blob = new Blob([docHtml], { type: 'text/html' });
+    const blobUrl = URL.createObjectURL(blob);
+    const w2 = window.open(blobUrl, '_blank');
+    if (!w2) {
+      toast('Pop-up blocked. Please allow pop-ups for this site, or open the app in a regular browser tab to print.', 'error');
+      // Last resort — replace current location? No, that's destructive.
+      return;
+    }
+    return;
+  }
+  try {
+    w.document.open();
+    w.document.write(docHtml);
+    w.document.close();
+  } catch (e) {
+    console.error('[print] failed to write doc to new window', e);
+    toast('Could not open print preview window. Try opening this app in a regular browser tab.', 'error');
+  }
+}
+
+// Old runPrint / applyPrintStyling are still used by the auto-print mode
+// (init() picks up ?print=1 query). Kept below for that path.
 function runPrint(paper, orient, scope) {
-  // First always try direct print — this works in most environments,
-  // including some Teams configurations. If we're CONFIDENTLY inside Teams
-  // (parent !== window AND the SDK loaded) AND the direct call gets
-  // blocked, we fall back to opening a new browser window.
-  const inTeams = !!(window.microsoftTeams && window.parent !== window);
-  console.log('[print] inTeams =', inTeams, 'paper =', paper, 'orient =', orient, 'scope =', scope);
-
-  // Apply print styling immediately so the page is ready
   applyPrintStyling(paper, orient, scope);
-
-  // Helper: actually call print() in this window
-  const tryDirectPrint = () => {
-    return new Promise((resolve) => {
-      try {
-        // Some browsers fire afterprint async, others not at all. We just
-        // attempt the call and trust the dialog opened.
-        window.print();
-        console.log('[print] window.print() returned');
-        resolve(true);
-      } catch (e) {
-        console.error('[print] window.print() threw', e);
-        resolve(false);
-      }
-    });
-  };
-
-  // Helper: open a new browser window with ?print=1 so it self-prints
-  const openPrintWindow = () => {
-    const url = window.location.href.split('?')[0].split('#')[0]
-      + `?print=1&paper=${paper}&orient=${orient}&scope=${scope}`;
-    console.log('[print] opening new window:', url);
-    const w = window.open(url, '_blank', 'noopener,width=1100,height=800');
-    if (!w) {
-      toast('Pop-up blocked. Allow pop-ups for this site, or open it in your browser via "Open in browser" in the Teams tab menu.', 'error');
-      return false;
-    }
-    toast('Print view opened in a new window.', 'info');
-    return true;
-  };
-
   setTimeout(() => {
-    if (inTeams) {
-      // In Teams: direct print is usually blocked. Try a new window first.
-      const opened = openPrintWindow();
-      if (!opened) {
-        // Pop-up blocked → last resort try direct print anyway
-        tryDirectPrint();
-      }
-    } else {
-      // Regular browser — direct print
-      tryDirectPrint();
-    }
-    // Cleanup print styling after the dialog has had a chance to capture it
+    try { window.print(); } catch (e) { console.error(e); }
     setTimeout(() => {
       document.body.classList.remove('printing');
       const s = document.getElementById('dynamicPrintStyle');
@@ -7707,8 +8038,21 @@ async function init() {
   });
 
   renderAll();
+  // Align DOM (active tab class + display:none) with whatever STATE.view
+  // was restored from localStorage. Without this the user's last view
+  // would be rendered into a hidden container while Gantt stayed visible.
+  applyViewToDom(STATE.view || 'gantt');
   // Initial: today at left
   setTimeout(scrollTodayDefault, 100);
+
+  // Restore the right scroll position based on the active view (today for
+  // Gantt/Calendar/Workload). Slight delay so the now-visible view has
+  // measured itself correctly first.
+  setTimeout(() => {
+    if (STATE.view === 'gantt') scrollTodayDefault();
+    else if (STATE.view === 'calendar') scrollCalendarToToday();
+    else if (STATE.view === 'workload') scrollWorkloadToToday();
+  }, 150);
 
   // Track focused inputs so incoming Firestore syncs don't blow away the
   // user's typing.
