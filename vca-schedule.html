@@ -6,6 +6,25 @@
 <title>VCA Schedule</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%231a1410'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' font-weight='600' fill='%23d4a574' text-anchor='middle'%3EV%3C/text%3E%3C/svg%3E" />
 
+<!-- Microsoft Teams JS SDK — initializes the app when running inside a Teams
+     tab (so Teams knows the app loaded and stops showing its loading
+     spinner). Loaded async; does nothing in a regular browser. -->
+<script src="https://res.cdn.office.net/teams-js/2.19.0/js/MicrosoftTeams.min.js"></script>
+<script>
+  // If we're inside Teams, call initialize() and notifySuccess so Teams
+  // dismisses its loading indicator. Wrapped in try/catch so a non-Teams
+  // browser context (the SDK still defines the global) doesn't error out.
+  window.addEventListener('DOMContentLoaded', () => {
+    try {
+      if (window.microsoftTeams && microsoftTeams.app && typeof microsoftTeams.app.initialize === 'function') {
+        microsoftTeams.app.initialize().then(() => {
+          if (microsoftTeams.app.notifySuccess) microsoftTeams.app.notifySuccess();
+        }).catch(() => { /* not in Teams — ignore */ });
+      }
+    } catch (e) { /* not in Teams — ignore */ }
+  });
+</script>
+
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
   import { getFirestore, doc, setDoc, onSnapshot }
