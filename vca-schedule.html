@@ -1033,6 +1033,7 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
       <span id="currentUserName" style="font-size: 11px;">Not set</span>
     </button>
     <span id="syncStatus" style="color: var(--text-faint); font-size: 11px;">Local</span>
+    <button class="btn" id="refreshBtn" title="Reload latest version from GitHub Pages (clears cache)">↻ Refresh</button>
     <button class="btn" id="printBtn" title="Print Gantt chart">🖨 Print</button>
     <button class="btn" id="settingsBtn">⚙ Settings</button>
     <button class="btn primary" id="newProjectBtn">+ New Project</button>
@@ -6375,6 +6376,19 @@ function flushPendingSnapshotIfIdle() {
 }
 
 // Print dialog: pick paper size + which view, then print using a CSS @page rule.
+// Force a hard reload of the page from the server, busting browser cache.
+// Useful in Teams where the iframe holds onto an older version of the HTML
+// and isn't easily refreshable. Adds a cache-busting query param so the CDN
+// definitely re-fetches the file.
+function forceRefreshFromServer() {
+  const url = new URL(window.location.href);
+  // Drop any existing _v= cache buster, then add a fresh one
+  url.searchParams.delete('_v');
+  url.searchParams.set('_v', Date.now().toString(36));
+  // Replace (not push) so the user's back button doesn't end up here
+  window.location.replace(url.toString());
+}
+
 function openPrintDialog() {
   const html = `
     <div class="modal-content" style="max-width: 480px;">
@@ -6433,37 +6447,64 @@ function openPrintDialog() {
 }
 
 function runPrint(paper, orient, scope) {
-  // Detect if we're running inside Microsoft Teams. If so, window.print()
-  // can be silently blocked by the Teams iframe sandbox. Workaround: pop a
-  // new window with the same URL plus a ?print=1 query param so the user
-  // gets a normal browser print dialog. Outside Teams, print directly.
-  const inTeams = !!(window.microsoftTeams && window.parent !== window) ||
-                  navigator.userAgent.toLowerCase().includes('teams');
-  if (inTeams) {
+  // First always try direct print — this works in most environments,
+  // including some Teams configurations. If we're CONFIDENTLY inside Teams
+  // (parent !== window AND the SDK loaded) AND the direct call gets
+  // blocked, we fall back to opening a new browser window.
+  const inTeams = !!(window.microsoftTeams && window.parent !== window);
+  console.log('[print] inTeams =', inTeams, 'paper =', paper, 'orient =', orient, 'scope =', scope);
+
+  // Apply print styling immediately so the page is ready
+  applyPrintStyling(paper, orient, scope);
+
+  // Helper: actually call print() in this window
+  const tryDirectPrint = () => {
+    return new Promise((resolve) => {
+      try {
+        // Some browsers fire afterprint async, others not at all. We just
+        // attempt the call and trust the dialog opened.
+        window.print();
+        console.log('[print] window.print() returned');
+        resolve(true);
+      } catch (e) {
+        console.error('[print] window.print() threw', e);
+        resolve(false);
+      }
+    });
+  };
+
+  // Helper: open a new browser window with ?print=1 so it self-prints
+  const openPrintWindow = () => {
     const url = window.location.href.split('?')[0].split('#')[0]
       + `?print=1&paper=${paper}&orient=${orient}&scope=${scope}`;
-    const w = window.open(url, '_blank', 'noopener');
+    console.log('[print] opening new window:', url);
+    const w = window.open(url, '_blank', 'noopener,width=1100,height=800');
     if (!w) {
-      toast('Pop-up blocked. Allow pop-ups for this site to print.', 'error');
-    } else {
-      toast('Opening print view in a new window…', 'info');
+      toast('Pop-up blocked. Allow pop-ups for this site, or open it in your browser via "Open in browser" in the Teams tab menu.', 'error');
+      return false;
     }
-    return;
-  }
-  applyPrintStyling(paper, orient, scope);
-  // Give the layout a moment to settle, then trigger native print
+    toast('Print view opened in a new window.', 'info');
+    return true;
+  };
+
   setTimeout(() => {
-    try {
-      window.print();
-    } catch (e) {
-      toast('Print failed. Try opening this page in a regular browser tab.', 'error');
+    if (inTeams) {
+      // In Teams: direct print is usually blocked. Try a new window first.
+      const opened = openPrintWindow();
+      if (!opened) {
+        // Pop-up blocked → last resort try direct print anyway
+        tryDirectPrint();
+      }
+    } else {
+      // Regular browser — direct print
+      tryDirectPrint();
     }
-    // Cleanup after print dialog closes
+    // Cleanup print styling after the dialog has had a chance to capture it
     setTimeout(() => {
       document.body.classList.remove('printing');
       const s = document.getElementById('dynamicPrintStyle');
       if (s) s.remove();
-    }, 500);
+    }, 800);
   }, 100);
 }
 
@@ -7482,6 +7523,7 @@ async function init() {
   });
   $('#settingsBtn').addEventListener('click', openSettings);
   $('#printBtn').addEventListener('click', openPrintDialog);
+  $('#refreshBtn').addEventListener('click', forceRefreshFromServer);
   $('#currentUserBadge').addEventListener('click', promptForUserIdentity);
   $('#undoBtn').addEventListener('click', performUndo);
   $('#redoBtn').addEventListener('click', performRedo);
