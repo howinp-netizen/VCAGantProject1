@@ -1291,6 +1291,19 @@ function loadLocal() {
       if (typeof parsed._workloadThreshold === 'number') STATE.workloadThreshold = parsed._workloadThreshold;
       if (parsed._filterBarLayout) STATE.filterBarLayout = { ...STATE.filterBarLayout, ...parsed._filterBarLayout };
       if (parsed._projectSort) STATE.projectSort = parsed._projectSort;
+      // Restore UI state — view, filters, calendar toggles. Uses the
+      // localStorage cache for instant restore on page load; Firebase will
+      // sync up the canonical version once it's connected.
+      if (parsed._uiState && typeof parsed._uiState === 'object') {
+        const u = parsed._uiState;
+        if (typeof u.view === 'string')           STATE.view = u.view;
+        if (typeof u.colorMode === 'string')      STATE.colorMode = u.colorMode;
+        if (typeof u.zoomLevel === 'string')      STATE.zoomLevel = u.zoomLevel;
+        if (typeof u.showMilestones === 'boolean') STATE.showMilestones = u.showMilestones;
+        if (typeof u.showTasks === 'boolean')      STATE.showTasks = u.showTasks;
+        if (Array.isArray(u.filters))             STATE.filters = u.filters;
+
+      }
     }
     // current user: identifies "me" for created-by; can be set in Settings
     STATE.data.currentUserId = localStorage.getItem(CURRENT_USER_KEY) || null;
@@ -1373,6 +1386,15 @@ function saveLocal() {
       _workloadThreshold: STATE.workloadThreshold,
       _filterBarLayout: STATE.filterBarLayout,
       _projectSort: STATE.projectSort,
+      // UI state cache — view, filters, calendar toggles
+      _uiState: {
+        view: STATE.view,
+        colorMode: STATE.colorMode,
+        zoomLevel: STATE.zoomLevel,
+        showMilestones: STATE.showMilestones,
+        showTasks: STATE.showTasks,
+        filters: STATE.filters || [],
+      },
     }));
     if (STATE.data.currentUserId) localStorage.setItem(CURRENT_USER_KEY, STATE.data.currentUserId);
     else localStorage.removeItem(CURRENT_USER_KEY);
@@ -1409,6 +1431,17 @@ function buildUserPrefsPayload() {
     filterBarLayout: STATE.filterBarLayout || {},
     projectSort: STATE.projectSort || 'manual',
     workloadThreshold: STATE.workloadThreshold ?? 3,
+    // UI state — what view I'm in, what filters I've applied, calendar
+    // toggle states. Persisting these means closing the tab and coming
+    // back keeps me where I was.
+    uiState: {
+      view: STATE.view,
+      colorMode: STATE.colorMode,
+      zoomLevel: STATE.zoomLevel,
+      showMilestones: STATE.showMilestones,
+      showTasks: STATE.showTasks,
+      filters: STATE.filters || [],
+    },
     _updated: new Date().toISOString(),
   };
 }
@@ -1435,7 +1468,6 @@ function applyUserPrefsPayload(p) {
       STATE.sidePanelVisibleWidth = p.sidePanelVisibleWidth;
     }
     if (p.columnSettings && typeof p.columnSettings === 'object') {
-      // Merge each known column's saved width/visible into our defaults
       for (const k of Object.keys(STATE.columnSettings)) {
         if (p.columnSettings[k]) {
           STATE.columnSettings[k] = { ...STATE.columnSettings[k], ...p.columnSettings[k] };
@@ -1445,6 +1477,16 @@ function applyUserPrefsPayload(p) {
     if (p.filterBarLayout) STATE.filterBarLayout = { ...STATE.filterBarLayout, ...p.filterBarLayout };
     if (typeof p.projectSort === 'string') STATE.projectSort = p.projectSort;
     if (typeof p.workloadThreshold === 'number') STATE.workloadThreshold = p.workloadThreshold;
+    if (p.uiState && typeof p.uiState === 'object') {
+      const u = p.uiState;
+      if (typeof u.view === 'string')           STATE.view = u.view;
+      if (typeof u.colorMode === 'string')      STATE.colorMode = u.colorMode;
+      if (typeof u.zoomLevel === 'string')      STATE.zoomLevel = u.zoomLevel;
+      if (typeof u.showMilestones === 'boolean') STATE.showMilestones = u.showMilestones;
+      if (typeof u.showTasks === 'boolean')      STATE.showTasks = u.showTasks;
+      if (Array.isArray(u.filters))             STATE.filters = u.filters;
+
+    }
     saveLocal();
   } finally {
     _suspendUserPrefsSync = false;
@@ -2503,6 +2545,7 @@ function renderFilterBar() {
     pill.innerHTML = `<span style="font-weight:500;">${escapeHtml(cfg.label)}:</span> ${escapeHtml(opt ? opt.label : f.value)} <span class="x" data-idx="${idx}">×</span>`;
     pill.querySelector('.x').addEventListener('click', () => {
       STATE.filters.splice(idx, 1);
+      persistUiState();
       renderAll();
     });
     if (addBtn && addBtn.parentElement === moreGroup) {
@@ -2609,6 +2652,7 @@ function toggleQuickFilter(kind) {
       STATE.filters.push({ type: 'hide_completed', value: 'milestones' });
     }
   }
+  persistUiState();
   renderAll();
 }
 
@@ -2663,7 +2707,7 @@ function openQuickFilterPicker(anchor, type) {
         const idx = STATE.filters.findIndex(f => f.type === type && f.value === value);
         if (idx >= 0) STATE.filters.splice(idx, 1);
         else STATE.filters.push({ type, value });
-        // Re-render gantt/cal but keep popup open for multiple toggles
+        persistUiState();
         renderAll();
         popup.innerHTML = renderItems();
         wireUp();
@@ -2674,6 +2718,7 @@ function openQuickFilterPicker(anchor, type) {
         e.stopPropagation();
         const t = item.dataset.clearType;
         STATE.filters = STATE.filters.filter(f => f.type !== t);
+        persistUiState();
         renderAll();
         closePopup();
       });
@@ -2941,6 +2986,14 @@ function refreshUndoRedoButtons() {
   }
 }
 
+// Persist any UI-state change (filters, view, calendar toggles, etc.) to
+// both localStorage cache and the user's Firebase prefs document. Called
+// from anywhere a STATE.filters / STATE.view / STATE.show* mutation happens.
+function persistUiState() {
+  saveLocal();
+  scheduleUserPrefsSync();
+}
+
 function refreshCurrentUserBadge() {
   const badge = $('#currentUserBadge');
   const dot = $('#currentUserDot');
@@ -2973,9 +3026,12 @@ function setView(v) {
   $('#calendarToolbar').style.display = v === 'calendar' ? 'flex' : 'none';
   $('#myworkToolbar').style.display = v === 'mywork' ? 'flex' : 'none';
   $('#workloadToolbar').style.display = v === 'workload' ? 'flex' : 'none';
-  // Filter bar only shown in gantt and calendar
   $('#filterBar').style.display = (v === 'gantt' || v === 'calendar') ? 'flex' : 'none';
   renderAll();
+  // Persist the chosen view so reopening the app puts the user back where
+  // they were (same tab, same filters, etc).
+  saveLocal();
+  scheduleUserPrefsSync();
   if (v === 'gantt') setTimeout(scrollTodayDefault, 50);
   if (v === 'calendar') setTimeout(scrollCalendarToToday, 50);
   if (v === 'workload') setTimeout(scrollWorkloadToToday, 50);
@@ -5516,8 +5572,11 @@ function renderCalendar() {
   const view = $('#calendarView');
 
   // Preserve current scroll position so toggling Milestones/Tasks checkboxes doesn't jump us.
+  // EXCEPT on first render of the calendar this session — then we want to
+  // anchor on today (handled in setView via scrollCalendarToToday).
   const prevScroll = $('#calScrollWrap');
-  const prevScrollTop = prevScroll ? prevScroll.scrollTop : null;
+  const prevScrollTop = (prevScroll && STATE._calendarSeen) ? prevScroll.scrollTop : null;
+  STATE._calendarSeen = true;
 
   const events = collectCalendarEvents();
   const eventsByDate = {};
@@ -5702,10 +5761,20 @@ function collectCalendarEvents() {
 }
 
 function scrollCalendarToToday() {
-  const el = $('#calCurrentMonth');
   const wrap = $('#calScrollWrap');
-  if (el && wrap) {
-    wrap.scrollTop = el.offsetTop - 10;
+  if (!wrap) return;
+  // Prefer the actual today cell so the row containing today is centered;
+  // fall back to the month section if the cell isn't found (e.g. clipped).
+  const todayCell = wrap.querySelector('.cal-day.today');
+  const monthSection = wrap.querySelector('#calCurrentMonth');
+  if (todayCell) {
+    // Center today in the viewport rather than scrolling it to the top, so
+    // the user can see surrounding days (week before / week after).
+    const viewportH = wrap.clientHeight;
+    const target = todayCell.offsetTop - (viewportH / 2) + (todayCell.offsetHeight / 2);
+    wrap.scrollTop = Math.max(0, target);
+  } else if (monthSection) {
+    wrap.scrollTop = monthSection.offsetTop - 10;
   }
 }
 
@@ -6364,9 +6433,43 @@ function openPrintDialog() {
 }
 
 function runPrint(paper, orient, scope) {
-  // Inject a temporary @page rule with the chosen size + orientation.
-  // Browsers honor the @page rule for the page size; users still confirm in
-  // the print dialog (and may need to enable "Background graphics" for colors).
+  // Detect if we're running inside Microsoft Teams. If so, window.print()
+  // can be silently blocked by the Teams iframe sandbox. Workaround: pop a
+  // new window with the same URL plus a ?print=1 query param so the user
+  // gets a normal browser print dialog. Outside Teams, print directly.
+  const inTeams = !!(window.microsoftTeams && window.parent !== window) ||
+                  navigator.userAgent.toLowerCase().includes('teams');
+  if (inTeams) {
+    const url = window.location.href.split('?')[0].split('#')[0]
+      + `?print=1&paper=${paper}&orient=${orient}&scope=${scope}`;
+    const w = window.open(url, '_blank', 'noopener');
+    if (!w) {
+      toast('Pop-up blocked. Allow pop-ups for this site to print.', 'error');
+    } else {
+      toast('Opening print view in a new window…', 'info');
+    }
+    return;
+  }
+  applyPrintStyling(paper, orient, scope);
+  // Give the layout a moment to settle, then trigger native print
+  setTimeout(() => {
+    try {
+      window.print();
+    } catch (e) {
+      toast('Print failed. Try opening this page in a regular browser tab.', 'error');
+    }
+    // Cleanup after print dialog closes
+    setTimeout(() => {
+      document.body.classList.remove('printing');
+      const s = document.getElementById('dynamicPrintStyle');
+      if (s) s.remove();
+    }, 500);
+  }, 100);
+}
+
+// Apply print-mode CSS overrides. Extracted from runPrint() so the new
+// pop-up print window can call it on its own load too.
+function applyPrintStyling(paper, orient, scope) {
   const sizeMap = {
     letter: '8.5in 11in',
     tabloid: '11in 17in',
@@ -6402,25 +6505,12 @@ function runPrint(paper, orient, scope) {
     body.printing .gantt-side-body, body.printing .gantt-grid-wrap {
       height: auto !important; max-height: none !important;
     }
-    /* Make sure project end labels print readable */
     body.printing .project-end-label { color: black !important; text-shadow: none !important; }
     body.printing .proj-tag-num { background: #d4a574 !important; color: black !important; }
-    /* Print color adjustment */
     * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
   `;
   document.head.appendChild(styleEl);
   document.body.classList.add('printing');
-
-  // Give the layout a moment to settle, then trigger native print
-  setTimeout(() => {
-    window.print();
-    // Cleanup after print dialog closes
-    setTimeout(() => {
-      document.body.classList.remove('printing');
-      const s = document.getElementById('dynamicPrintStyle');
-      if (s) s.remove();
-    }, 500);
-  }, 100);
 }
 
 function openSettings() {
@@ -7362,13 +7452,15 @@ async function init() {
 
   $$('.tab').forEach(t => t.addEventListener('click', () => setView(t.dataset.view)));
 
-  $('#colorMode').addEventListener('change', (e) => { STATE.colorMode = e.target.value; renderAll(); });
+  $('#colorMode').addEventListener('change', (e) => { STATE.colorMode = e.target.value; saveLocal(); scheduleUserPrefsSync(); renderAll(); });
 
   $$('#zoomToggle .zoom-btn').forEach(b => {
     b.addEventListener('click', () => {
       $$('#zoomToggle .zoom-btn').forEach(x => x.classList.remove('active'));
       b.classList.add('active');
       STATE.zoomLevel = b.dataset.zoom;
+      saveLocal();
+      scheduleUserPrefsSync();
       renderGantt();
       setTimeout(scrollTodayDefault, 30);
     });
@@ -7379,8 +7471,8 @@ async function init() {
     e.stopPropagation();
     openColumnsPopup(e.currentTarget);
   });
-  $('#showMilestones').addEventListener('change', (e) => { STATE.showMilestones = e.target.checked; renderCalendar(); });
-  $('#showTasks').addEventListener('change', (e) => { STATE.showTasks = e.target.checked; renderCalendar(); });
+  $('#showMilestones').addEventListener('change', (e) => { STATE.showMilestones = e.target.checked; saveLocal(); scheduleUserPrefsSync(); renderCalendar(); });
+  $('#showTasks').addEventListener('change', (e) => { STATE.showTasks = e.target.checked; saveLocal(); scheduleUserPrefsSync(); renderCalendar(); });
 
   $('#newProjectBtn').addEventListener('click', () => {
     if (!canCreateProject(true)) return;
@@ -7449,7 +7541,7 @@ async function init() {
   $('#workloadToday').addEventListener('click', scrollWorkloadToToday);
 
   $('#addFilterBtn').addEventListener('click', openAddFilterMenu);
-  $('#clearFiltersBtn').addEventListener('click', () => { STATE.filters = []; renderAll(); });
+  $('#clearFiltersBtn').addEventListener('click', () => { STATE.filters = []; persistUiState(); renderAll(); });
   $('#sortBtn').addEventListener('click', (e) => {
     e.stopPropagation();
     openSortPopup(e.currentTarget);
@@ -7584,6 +7676,23 @@ async function init() {
   // choice is stored in localStorage and persists for that browser/profile.
   if (!STATE.data.currentUserId) {
     setTimeout(promptForUserIdentity, 400);
+  }
+
+  // Auto-print mode: when launched with ?print=1, apply print styling and
+  // open the browser print dialog. This is how the in-Teams "Print" button
+  // works around the iframe's blocked window.print() — it pops a normal
+  // browser window with this query, and the new window prints itself.
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('print') === '1') {
+    const paper  = params.get('paper')  || 'letter';
+    const orient = params.get('orient') || 'landscape';
+    const scope  = params.get('scope')  || 'current';
+    setTimeout(() => {
+      applyPrintStyling(paper, orient, scope);
+      setTimeout(() => {
+        try { window.print(); } catch (e) { /* ignore */ }
+      }, 400);
+    }, 600);
   }
 }
 
