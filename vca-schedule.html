@@ -6407,8 +6407,13 @@ function closeModal() {
 }
 
 // Mount a modal's HTML into the modal root container. Pairs with closeModal.
+// If the HTML is just the inner content (no .modal-overlay wrapper), we wrap
+// it so the dark backdrop / centered fixed positioning kicks in correctly.
 function showModal(html) {
-  $('#modalRoot').innerHTML = html;
+  const wrapped = html.trim().startsWith('<div class="modal-overlay"')
+    ? html
+    : `<div class="modal-overlay">${html}</div>`;
+  $('#modalRoot').innerHTML = wrapped;
 }
 
 // If we have a deferred Firestore snapshot waiting and the user has fully
@@ -6498,7 +6503,7 @@ function openPrintDialog() {
       </div>
     </div>
   `;
-  $("#modalRoot").innerHTML = html;
+  showModal(html);
   $('#printCancel').addEventListener('click', closeModal);
   $('#printGo').addEventListener('click', () => {
     const paper = document.querySelector('input[name="paperSize"]:checked').value;
@@ -8033,7 +8038,7 @@ function promptForUserIdentity() {
       </div>
     </div>
   `;
-  $("#modalRoot").innerHTML = html;
+  showModal(html);
 
   document.querySelectorAll('.user-pick-card').forEach(btn => {
     btn.addEventListener('click', () => {
