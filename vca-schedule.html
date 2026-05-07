@@ -1132,7 +1132,7 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
     <span class="filter-separator" id="filterSeparator" title="Click to collapse/expand · drag to reorder"></span>
     <div class="filter-group" id="filterGroupMore">
       <span class="tool-label">Filters</span>
-      <button class="btn small" id="addFilterBtn">+ More</button>
+      <button class="btn small" id="addFilterBtn" title="Open all filters">⊞ All Filters</button>
       <button class="btn small" id="clearFiltersBtn" style="display:none;">Clear All</button>
       <button class="btn small" id="sortBtn" title="Change project sort order">⇅ Sort: Manual</button>
     </div>
@@ -2375,7 +2375,7 @@ const FILTER_TYPES = {
   manager: { label: 'Project Manager', getOptions: () =>
     STATE.data.engineers.map(e => ({ value: e.id, label: `${e.name} (${e.role})` }))
   },
-  engineer: { label: 'Manager', getOptions: () =>
+  engineer: { label: 'Assignee', getOptions: () =>
     STATE.data.engineers.map(e => ({ value: e.id, label: `${e.name} (${e.role})` }))
   },
   category: { label: 'Phase/Type', getOptions: () =>
@@ -2743,6 +2743,101 @@ function openQuickFilterPicker(anchor, type) {
     });
   };
   wireUp();
+}
+
+// New filter panel — shows all filter categories at once in a grid, with
+// checkboxes for each option. Lets the user toggle multiple filters across
+// categories without dropdown-clicking through them one by one.
+function openFilterPanel() {
+  const html = `
+    <div class="modal-content" style="max-width: 1000px; width: 95vw; max-height: 85vh; display: flex; flex-direction: column;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+        <h2>Filters <span style="font-size:11px; color:var(--text-faint); margin-left:8px;">${STATE.filters.length} active</span></h2>
+        <div style="display:flex; gap:8px;">
+          <button class="btn small" id="filterPanelClearAll" ${STATE.filters.length === 0 ? 'disabled' : ''}>Clear All</button>
+          <button class="btn primary" id="filterPanelDone">Done</button>
+        </div>
+      </div>
+      <div id="filterPanelGrid" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap:12px; overflow-y:auto; flex:1; padding-right:4px;">
+        ${Object.entries(FILTER_TYPES).map(([key, cfg]) => {
+          const opts = cfg.getOptions();
+          if (!opts || opts.length === 0) return '';
+          const activeForType = new Set(STATE.filters.filter(f => f.type === key).map(f => f.value));
+          return `
+            <div class="filter-card" style="border:1px solid var(--border-strong); border-radius:6px; padding:10px; background: var(--panel);">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; padding-bottom:6px; border-bottom:1px solid var(--border-strong);">
+                <div style="font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:0.3px; color:var(--text);">
+                  ${escapeHtml(cfg.label)}
+                  ${activeForType.size > 0 ? `<span style="color:var(--accent); margin-left:6px; font-size:10px;">${activeForType.size}</span>` : ''}
+                </div>
+                <button class="btn small" data-filter-clear-type="${key}" style="font-size:9px; padding:2px 6px;" ${activeForType.size === 0 ? 'disabled' : ''}>Clear</button>
+              </div>
+              <div style="max-height: 200px; overflow-y: auto; padding-right:2px;">
+                ${opts.map(o => `
+                  <label style="display:flex; align-items:center; gap:6px; padding:4px 6px; border-radius:3px; cursor:pointer; font-size:12px; ${activeForType.has(o.value) ? 'background: var(--accent-soft);' : ''}" data-filter-row>
+                    <input type="checkbox" data-filter-type="${escapeHtml(key)}" data-filter-value="${escapeHtml(o.value)}" ${activeForType.has(o.value) ? 'checked' : ''} />
+                    <span style="flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(o.label)}</span>
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+  showModal(html);
+
+  // Toggle a filter when its checkbox changes
+  $$('input[data-filter-type]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const type = cb.dataset.filterType;
+      const value = cb.dataset.filterValue;
+      const idx = STATE.filters.findIndex(f => f.type === type && f.value === value);
+      if (cb.checked && idx < 0) {
+        STATE.filters.push({ type, value });
+      } else if (!cb.checked && idx >= 0) {
+        STATE.filters.splice(idx, 1);
+      }
+      // Visual feedback on the row
+      const row = cb.closest('[data-filter-row]');
+      if (row) row.style.background = cb.checked ? 'var(--accent-soft)' : '';
+      // Update active counts in the card header
+      const card = cb.closest('.filter-card');
+      if (card) {
+        const checked = card.querySelectorAll('input[type="checkbox"]:checked').length;
+        const headerCount = card.querySelector('[style*="--accent"]');
+        // Simpler: just re-render counts on the headers
+      }
+      persistUiState();
+      renderAll();
+    });
+  });
+
+  // "Clear" button per category
+  $$('button[data-filter-clear-type]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const type = btn.dataset.filterClearType;
+      STATE.filters = STATE.filters.filter(f => f.type !== type);
+      persistUiState();
+      renderAll();
+      // Re-render the panel to refresh counts/checkboxes
+      closeModal();
+      openFilterPanel();
+    });
+  });
+
+  $('#filterPanelClearAll').addEventListener('click', () => {
+    STATE.filters = [];
+    persistUiState();
+    renderAll();
+    closeModal();
+    openFilterPanel();
+  });
+
+  $('#filterPanelDone').addEventListener('click', () => {
+    closeModal();
+  });
 }
 
 function openAddFilterMenu() {
@@ -3675,7 +3770,7 @@ function renderGanttSideRow(row) {
     return `
       <div class="row project-row">
         <div class="row-side ${sel}" data-type="project" data-project-id="${p.id}">
-          ${wrap('name', `<span class="expand-icon" data-toggle="project" data-project-id="${p.id}">${expandIcon}</span><span class="name-text" data-rename="project" data-project-id="${p.id}" title="Click to open · double-click to rename">${numLabel}${escapeHtml(p.name)}<span class="rename-edit-icon" title="Rename">✏️</span></span><button class="row-add-btn" data-add="milestone" data-project-id="${p.id}" title="Add milestone">+</button>`)}
+          ${wrap('name', `<span class="expand-icon" data-toggle="project" data-project-id="${p.id}">${expandIcon}</span><span class="name-text" data-rename="project" data-project-id="${p.id}">${numLabel}${escapeHtml(p.name)}<span class="rename-edit-icon">✏️</span></span><button class="row-add-btn" data-add="milestone" data-project-id="${p.id}" title="Add milestone">+</button>`)}
           ${wrap('client', `<span class="client-text" title="${escapeHtml(p.client || '')}">${p.client ? escapeHtml(p.client) : '<span class=\"editable-empty\">—</span>'}</span>`)}
           ${wrap('mgr', `<span class="editable-cell" data-edit-cell="manager" data-project-id="${p.id}" title="Click to change manager">${mgrCell}</span>`)}
           ${wrap('assign', assignCell)}
@@ -3718,7 +3813,7 @@ function renderGanttSideRow(row) {
     return `
       <div class="row milestone-row">
         <div class="row-side indent-1 ${sel}" data-type="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">
-          ${wrap('name', `<span class="expand-icon ${expandClass}" data-toggle="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">${expandIcon || '·'}</span><span class="name-text" data-rename="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Click to open · double-click to rename">◆ ${escapeHtml(m.name)}<span class="rename-edit-icon" title="Rename">✏️</span></span>${visBadge}${progressIcon}<button class="row-add-btn" data-add="task" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Add task to this milestone">+</button>`)}
+          ${wrap('name', `<span class="expand-icon ${expandClass}" data-toggle="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">${expandIcon || '·'}</span><span class="name-text" data-rename="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">◆ ${escapeHtml(m.name)}<span class="rename-edit-icon">✏️</span></span>${visBadge}${progressIcon}<button class="row-add-btn" data-add="task" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Add task to this milestone">+</button>`)}
           ${wrap('client', '')}
           ${wrap('mgr', '')}
           ${wrap('assign', `<span class="editable-cell" data-edit-cell="assignees" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Click to assign">${assignCell}</span>`)}
@@ -3742,7 +3837,7 @@ function renderGanttSideRow(row) {
     return `
       <div class="row">
         <div class="row-side indent-2 ${sel}" data-type="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}">
-          ${wrap('name', `<span class="expand-icon placeholder">·</span><span class="name-text" data-rename="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" style="color: var(--text-dim); font-size: 11px;" title="Click to open · double-click to rename">${escapeHtml(t.name || '(unnamed task)')}<span class="rename-edit-icon" title="Rename">✏️</span></span>`)}
+          ${wrap('name', `<span class="expand-icon placeholder">·</span><span class="name-text" data-rename="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" style="color: var(--text-dim); font-size: 11px;">${escapeHtml(t.name || '(unnamed task)')}<span class="rename-edit-icon">✏️</span></span>`)}
           ${wrap('client', '')}
           ${wrap('mgr', '')}
           ${wrap('assign', `<span class="editable-cell" data-edit-cell="t_assignee" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" title="Click to change assignee">${assignCell}</span>`)}
@@ -6454,63 +6549,177 @@ function forceRefreshFromServer() {
 }
 
 function openPrintDialog() {
-  // Simple modal: pick paper + orientation + scope, then "Print" button
-  // generates a print-friendly HTML document and routes it to the browser's
-  // print dialog. To work reliably inside the Teams iframe (where popups
-  // and direct window.print() can be blocked), we use a hidden iframe on
-  // this same page — populating it with our print HTML and calling print()
-  // on its contentWindow.
+  // Modal with live preview pane on the right. User can adjust paper size,
+  // orientation, scope, scale, column visibility, and bar/text balance —
+  // and see the resulting page render in real time before printing.
   const html = `
-    <div class="modal-content" style="max-width: 480px;">
-      <h2 style="margin-bottom: 16px;">Print Schedule</h2>
-      <div class="field-group" style="margin-bottom: 14px;">
-        <label class="field-label">Paper Size</label>
-        <div style="display:flex; gap:8px;">
-          <label style="flex:1; display:flex; align-items:center; gap:8px; padding:10px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
-            <input type="radio" name="paperSize" value="letter" checked />
-            <div><div style="font-weight:600;">Letter</div><div style="font-size:10px; color:var(--text-faint);">8.5 × 11"</div></div>
-          </label>
-          <label style="flex:1; display:flex; align-items:center; gap:8px; padding:10px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
-            <input type="radio" name="paperSize" value="tabloid" />
-            <div><div style="font-weight:600;">Tabloid</div><div style="font-size:10px; color:var(--text-faint);">11 × 17"</div></div>
-          </label>
+    <div class="modal-content" style="max-width: 1100px; width: 95vw;">
+      <h2 style="margin-bottom: 12px;">Print Schedule</h2>
+      <div style="display:grid; grid-template-columns: 280px 1fr; gap:14px; align-items:start;">
+
+        <!-- Left: controls -->
+        <div style="max-height: 70vh; overflow-y: auto; padding-right: 4px;">
+          <div class="field-group" style="margin-bottom: 12px;">
+            <label class="field-label">Paper Size</label>
+            <div style="display:flex; gap:6px;">
+              <label style="flex:1; display:flex; align-items:center; gap:6px; padding:8px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
+                <input type="radio" name="paperSize" value="letter" checked />
+                <div><div style="font-weight:600; font-size:12px;">Letter</div><div style="font-size:9px; color:var(--text-faint);">8.5×11"</div></div>
+              </label>
+              <label style="flex:1; display:flex; align-items:center; gap:6px; padding:8px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
+                <input type="radio" name="paperSize" value="tabloid" />
+                <div><div style="font-weight:600; font-size:12px;">Tabloid</div><div style="font-size:9px; color:var(--text-faint);">11×17"</div></div>
+              </label>
+            </div>
+          </div>
+
+          <div class="field-group" style="margin-bottom: 12px;">
+            <label class="field-label">Orientation</label>
+            <div style="display:flex; gap:6px;">
+              <label style="flex:1; display:flex; align-items:center; justify-content:center; gap:6px; padding:6px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer; font-size:12px;">
+                <input type="radio" name="orientation" value="landscape" checked /> Landscape
+              </label>
+              <label style="flex:1; display:flex; align-items:center; justify-content:center; gap:6px; padding:6px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer; font-size:12px;">
+                <input type="radio" name="orientation" value="portrait" /> Portrait
+              </label>
+            </div>
+          </div>
+
+          <div class="field-group" style="margin-bottom: 12px;">
+            <label class="field-label">What to print</label>
+            <select class="field-input" id="printScope">
+              <option value="current">Current view (with active filters)</option>
+              <option value="all">All projects</option>
+            </select>
+          </div>
+
+          <div class="field-group" style="margin-bottom: 12px;">
+            <label class="field-label">Zoom <span id="printScaleLabel" style="color:var(--text-faint); font-size:10px;">(100%)</span></label>
+            <input type="range" id="printScale" min="60" max="160" value="100" step="5" style="width:100%;" />
+            <div style="display:flex; justify-content:space-between; font-size:9px; color:var(--text-faint);">
+              <span>Smaller</span><span>Larger</span>
+            </div>
+          </div>
+
+          <div class="field-group" style="margin-bottom: 12px;">
+            <label class="field-label">Timeline Width <span id="printBarLabel" style="color:var(--text-faint); font-size:10px;">(60%)</span></label>
+            <input type="range" id="printBarWidth" min="30" max="80" value="60" step="5" style="width:100%;" />
+            <div style="display:flex; justify-content:space-between; font-size:9px; color:var(--text-faint);">
+              <span>More info columns</span><span>Wider Gantt</span>
+            </div>
+          </div>
+
+          <div class="field-group" style="margin-bottom: 12px;">
+            <label class="field-label">Columns</label>
+            <div style="display:flex; flex-direction:column; gap:4px; font-size:11px;">
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="num" checked /> Project #</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="name" checked disabled /> Project / Milestone (always)</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="client" checked /> Client / Phase</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="mgr" checked /> Mgr / Assignees</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="due" /> Due Date column</label>
+            </div>
+          </div>
+
+          <div class="field-group" style="margin-bottom: 14px;">
+            <label class="field-label">Include</label>
+            <div style="display:flex; flex-direction:column; gap:4px; font-size:11px;">
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="incMilestoneRows" checked /> Milestone rows (under each project)</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="incToday" checked /> Today line</label>
+            </div>
+          </div>
+
+          <div style="background: var(--panel-2); padding: 8px 10px; border-radius: 4px; font-size: 10px; color: var(--text-dim); margin-bottom: 12px;">
+            In the print dialog, choose the matching paper size and enable <strong style="color:var(--text);">"Background graphics"</strong>.
+          </div>
+
+          <div style="display:flex; gap:6px;">
+            <button class="btn" id="printCancel" style="flex:1;">Cancel</button>
+            <button class="btn primary" id="printGo" style="flex:2;">🖨 Print</button>
+          </div>
         </div>
-      </div>
-      <div class="field-group" style="margin-bottom: 14px;">
-        <label class="field-label">Orientation</label>
-        <div style="display:flex; gap:8px;">
-          <label style="flex:1; display:flex; align-items:center; gap:6px; padding:8px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
-            <input type="radio" name="orientation" value="landscape" checked /> Landscape
-          </label>
-          <label style="flex:1; display:flex; align-items:center; gap:6px; padding:8px; border:1px solid var(--border-strong); border-radius:4px; cursor:pointer;">
-            <input type="radio" name="orientation" value="portrait" /> Portrait
-          </label>
+
+        <!-- Right: live preview -->
+        <div>
+          <div style="display:flex; justify-content:space-between; align-items:center; font-size:11px; color:var(--text-faint); margin-bottom:6px;">
+            <span>Live preview <span id="previewMeta"></span></span>
+            <span id="previewPageCount" style="color:var(--text-dim);"></span>
+          </div>
+          <div id="printPreviewFrame" style="background:#444; border-radius:4px; padding:12px; height:62vh; overflow:auto; display:flex; justify-content:center; align-items:flex-start;">
+            <iframe id="printPreviewIframe" style="background:white; box-shadow:0 4px 16px rgba(0,0,0,0.5); border:0; transition: width 0.15s, height 0.15s;"></iframe>
+          </div>
         </div>
-      </div>
-      <div class="field-group" style="margin-bottom: 16px;">
-        <label class="field-label">What to print</label>
-        <select class="field-input" id="printScope">
-          <option value="current">Current view (with active filters)</option>
-          <option value="all">All projects</option>
-        </select>
-      </div>
-      <div style="background: var(--panel-2); padding: 10px 12px; border-radius: 4px; font-size: 11px; color: var(--text-dim); margin-bottom: 16px;">
-        In the browser's print dialog, choose the matching paper size and enable <strong style="color:var(--text);">"Background graphics"</strong> for colors to print.
-      </div>
-      <div style="display:flex; gap:8px; justify-content:flex-end;">
-        <button class="btn" id="printCancel">Cancel</button>
-        <button class="btn primary" id="printGo">🖨 Print</button>
       </div>
     </div>
   `;
   showModal(html);
+
+  // Read all options from the form
+  const readOptions = () => ({
+    paper: document.querySelector('input[name="paperSize"]:checked').value,
+    orient: document.querySelector('input[name="orientation"]:checked').value,
+    scope: $('#printScope').value,
+    scale: parseInt($('#printScale').value, 10) / 100,
+    barWidth: parseInt($('#printBarWidth').value, 10) / 100,
+    cols: Array.from(document.querySelectorAll('input[type="checkbox"][data-col]:checked')).map(el => el.dataset.col),
+    incMilestoneRows: $('#incMilestoneRows').checked,
+    incToday: $('#incToday').checked,
+  });
+
+  // Live preview update — rebuild the print HTML and inject into the
+  // preview iframe. The iframe size is the actual page ratio scaled to
+  // fit the preview pane.
+  let previewUpdateScheduled = false;
+  const updatePreview = () => {
+    if (previewUpdateScheduled) return;
+    previewUpdateScheduled = true;
+    requestAnimationFrame(() => {
+      previewUpdateScheduled = false;
+      const opts = readOptions();
+      const dims = { letter: [8.5, 11], tabloid: [11, 17] }[opts.paper];
+      let w = dims[0], h = dims[1];
+      if (opts.orient === 'landscape') [w, h] = [h, w];
+      // Fit to preview pane: max ~700px wide
+      const targetW = 680;
+      const ratio = targetW / (w * 96);
+      const pxW = Math.round(w * 96 * ratio);
+      const pxH = Math.round(h * 96 * ratio);
+      const iframe = $('#printPreviewIframe');
+      if (!iframe) return;
+      iframe.style.width = pxW + 'px';
+      iframe.style.height = pxH + 'px';
+      // Build the actual document and write it into the iframe
+      const doc = buildPrintDocumentHtml(opts);
+      try {
+        const idoc = iframe.contentDocument || iframe.contentWindow.document;
+        idoc.open();
+        idoc.write(doc);
+        idoc.close();
+      } catch (e) {
+        console.error('[print preview] iframe write failed', e);
+      }
+      // Update meta labels
+      $('#previewMeta').textContent = `(${opts.paper === 'letter' ? 'Letter' : 'Tabloid'} · ${opts.orient === 'landscape' ? 'Landscape' : 'Portrait'} · ${Math.round(opts.scale * 100)}%)`;
+      $('#printScaleLabel').textContent = `(${Math.round(opts.scale * 100)}%)`;
+      $('#printBarLabel').textContent = `(${Math.round(opts.barWidth * 100)}%)`;
+      // Project count
+      const visible = (opts.scope === 'current')
+        ? STATE.data.projects.filter(p => projectPassesFilters(p))
+        : STATE.data.projects;
+      $('#previewPageCount').textContent = `${visible.length} projects`;
+    });
+  };
+
+  setTimeout(updatePreview, 80);
+  document.querySelectorAll('input, select').forEach(el => {
+    el.addEventListener('change', updatePreview);
+    el.addEventListener('input', updatePreview);
+  });
+
   $('#printCancel').addEventListener('click', closeModal);
   $('#printGo').addEventListener('click', () => {
-    const paper = document.querySelector('input[name="paperSize"]:checked').value;
-    const orient = document.querySelector('input[name="orientation"]:checked').value;
-    const scope = $('#printScope').value;
+    const opts = readOptions();
     closeModal();
-    doPrintViaIframe(paper, orient, scope);
+    doPrintViaIframe(opts);
   });
 }
 
@@ -6521,31 +6730,28 @@ function openPrintDialog() {
 // The iframe is appended, populated with our HTML, focused, and we call
 // .contentWindow.print() — which opens the browser's native print dialog
 // scoped to that iframe.
-function doPrintViaIframe(paper, orient, scope) {
-  console.log('[print] start', { paper, orient, scope });
+function doPrintViaIframe(opts) {
+  console.log('[print] start', opts);
   let docHtml;
   try {
-    docHtml = buildPrintDocumentHtml(paper, orient, scope);
+    docHtml = buildPrintDocumentHtml(opts);
   } catch (e) {
     console.error('[print] failed to build doc', e);
     toast('Could not build print document: ' + e.message, 'error');
     return;
   }
-  // Remove any prior print iframe
   const old = document.getElementById('printIframe');
   if (old) old.remove();
   const iframe = document.createElement('iframe');
   iframe.id = 'printIframe';
   iframe.style.cssText = 'position:fixed; right:0; bottom:0; width:0; height:0; border:0; visibility:hidden;';
   document.body.appendChild(iframe);
-  // Some browsers need the iframe in the DOM before document.open
   setTimeout(() => {
     try {
       const idoc = iframe.contentDocument || iframe.contentWindow.document;
       idoc.open();
       idoc.write(docHtml);
       idoc.close();
-      // Give layout a beat
       setTimeout(() => {
         try {
           iframe.contentWindow.focus();
@@ -6553,9 +6759,8 @@ function doPrintViaIframe(paper, orient, scope) {
           console.log('[print] iframe.contentWindow.print() called');
         } catch (e) {
           console.error('[print] iframe print failed', e);
-          toast('Print failed: ' + e.message + '. Try opening this page in a regular browser tab.', 'error');
+          toast('Print failed: ' + e.message, 'error');
         }
-        // Cleanup after a delay (let print dialog open first)
         setTimeout(() => { iframe.remove(); }, 60000);
       }, 350);
     } catch (e) {
@@ -6569,7 +6774,20 @@ function doPrintViaIframe(paper, orient, scope) {
 // Build a complete, self-contained printable HTML document. Returns a
 // string. Layout: a header, a month bar, then a table of rows for each
 // project + its milestones. Page breaks happen naturally between rows.
-function buildPrintDocumentHtml(paper, orient, scope) {
+function buildPrintDocumentHtml(opts) {
+  // Backward-compat: if called with positional args, normalize
+  if (typeof opts === 'string') {
+    opts = { paper: arguments[0], orient: arguments[1], scope: arguments[2] };
+  }
+  const paper  = opts.paper  || 'letter';
+  const orient = opts.orient || 'landscape';
+  const scope  = opts.scope  || 'current';
+  const scale  = opts.scale  || 1;
+  const barWidth = opts.barWidth || 0.6;  // fraction of row width devoted to Gantt bar
+  const cols   = opts.cols   || ['num', 'name', 'client', 'mgr'];
+  const incMilestoneRows = opts.incMilestoneRows !== false;
+  const incToday = opts.incToday !== false;
+
   const dims = { letter: [8.5, 11], tabloid: [11, 17] }[paper] || [8.5, 11];
   let pageW = dims[0], pageH = dims[1];
   if (orient === 'landscape') [pageW, pageH] = [pageH, pageW];
@@ -6578,7 +6796,7 @@ function buildPrintDocumentHtml(paper, orient, scope) {
     ? STATE.data.projects.filter(p => projectPassesFilters(p))
     : STATE.data.projects.slice();
 
-  // Compute timeline range from milestones
+  // Compute timeline range
   let minDate = null, maxDate = null;
   for (const p of visibleProjects) {
     for (const m of (p.milestones || [])) {
@@ -6603,46 +6821,68 @@ function buildPrintDocumentHtml(paper, orient, scope) {
     : STATE.view === 'workload' ? 'Workload'
     : 'Schedule';
 
+  // Compute column widths. Info columns share (1 - barWidth) of the row.
+  // The "name" column gets ~50% of the info side; others split the rest.
+  const infoCols = cols.filter(c => c !== 'bar');
+  const infoFrac = 1 - barWidth;
+  const colWidthMap = {};
+  // weights
+  const weights = { num: 0.18, name: 0.42, client: 0.18, mgr: 0.18, due: 0.12 };
+  let totalWeight = 0;
+  for (const c of infoCols) totalWeight += (weights[c] || 0.15);
+  for (const c of infoCols) {
+    colWidthMap[c] = ((weights[c] || 0.15) / totalWeight) * infoFrac * 100;
+  }
+  const barWidthPct = barWidth * 100;
+
   // Build rows
   const rowsHtml = visibleProjects.map(p => {
     const mgr = getEngineer(p.managerId);
     const milestones = (p.milestones || []).filter(m => milestonePassesFilters(m));
-    const projBar = milestones.map(m => {
+    const projBarHtml = milestones.map(m => {
       if (!m.dueDate) return '';
       const d = parseDate(m.dueDate);
       if (!d) return '';
-      const offset = daysBetween(minDate, d);
-      const left = (offset / totalDays) * 100;
+      const left = (daysBetween(minDate, d) / totalDays) * 100;
       return `<div class="ms-dot" style="left:${left}%;" title="${escapeHtml(m.name)}"></div>`;
     }).join('');
 
-    let rows = `<tr class="proj-row">
-      <td class="c-num">${escapeHtml(p.number || '')}</td>
-      <td class="c-name">${escapeHtml(p.name)}</td>
-      <td class="c-meta">${escapeHtml(p.client || '')}</td>
-      <td class="c-meta">${mgr ? escapeHtml(mgr.name) : ''}</td>
-      <td class="c-bar"><div class="bar-track">${projBar}</div></td>
-    </tr>`;
+    const cell = (col, content) => {
+      if (!cols.includes(col)) return '';
+      return `<td class="c-${col}" style="width:${colWidthMap[col]}%;">${content}</td>`;
+    };
 
-    rows += milestones.map(m => {
-      const cat = STATE.data.categories.find(c => c.id === m.categoryId);
-      const status = STATE.data.statuses.find(s => s.id === m.statusId);
-      const assignees = (m.assigneeIds || []).map(id => {
-        const e = getEngineer(id); return e ? e.name : '';
-      }).filter(Boolean).join(', ');
-      const d = m.dueDate ? parseDate(m.dueDate) : null;
-      const left = d ? (daysBetween(minDate, d) / totalDays) * 100 : 0;
-      return `<tr class="ms-row">
-        <td class="c-num"></td>
-        <td class="c-name">  ◆ ${escapeHtml(m.name)}</td>
-        <td class="c-meta">${escapeHtml(cat ? cat.name : '')}</td>
-        <td class="c-meta">${escapeHtml(assignees)}</td>
-        <td class="c-bar"><div class="bar-track">
-          ${d ? `<div class="ms-mark" style="left:${left}%;"><span class="d">◆</span><span class="t">${escapeHtml(m.dueDate)}${status ? ' · ' + escapeHtml(status.name) : ''}</span></div>` : ''}
-        </div></td>
-      </tr>`;
-    }).join('');
-    return rows;
+    let projRow = `<tr class="proj-row">`;
+    if (cols.includes('num')) projRow += `<td class="c-num" style="width:${colWidthMap.num}%;">${escapeHtml(p.number || '')}</td>`;
+    projRow += `<td class="c-name" style="width:${colWidthMap.name}%;">${escapeHtml(p.name)}</td>`;
+    if (cols.includes('client')) projRow += `<td class="c-client" style="width:${colWidthMap.client}%;">${escapeHtml(p.client || '')}</td>`;
+    if (cols.includes('mgr')) projRow += `<td class="c-mgr" style="width:${colWidthMap.mgr}%;">${mgr ? escapeHtml(mgr.name) : ''}</td>`;
+    if (cols.includes('due')) projRow += `<td class="c-due" style="width:${colWidthMap.due}%;"></td>`;
+    projRow += `<td class="c-bar" style="width:${barWidthPct}%;"><div class="bar-track">${projBarHtml}</div></td></tr>`;
+
+    let msRows = '';
+    if (incMilestoneRows) {
+      msRows = milestones.map(m => {
+        const cat = STATE.data.categories.find(c => c.id === m.categoryId);
+        const status = STATE.data.statuses.find(s => s.id === m.statusId);
+        const assignees = (m.assigneeIds || []).map(id => {
+          const e = getEngineer(id); return e ? abbreviateName(e.name) : '';
+        }).filter(Boolean).join(', ');
+        const d = m.dueDate ? parseDate(m.dueDate) : null;
+        const left = d ? (daysBetween(minDate, d) / totalDays) * 100 : 0;
+        let row = `<tr class="ms-row">`;
+        if (cols.includes('num')) row += `<td class="c-num"></td>`;
+        row += `<td class="c-name">  ◆ ${escapeHtml(m.name)}</td>`;
+        if (cols.includes('client')) row += `<td class="c-client">${escapeHtml(cat ? cat.name : '')}</td>`;
+        if (cols.includes('mgr')) row += `<td class="c-mgr">${escapeHtml(assignees)}</td>`;
+        if (cols.includes('due')) row += `<td class="c-due">${escapeHtml(m.dueDate || '')}</td>`;
+        row += `<td class="c-bar"><div class="bar-track">${
+          d ? `<div class="ms-mark" style="left:${left}%;"><span class="d">◆</span><span class="t">${escapeHtml(m.dueDate)}${status ? ' · ' + escapeHtml(status.name) : ''}</span></div>` : ''
+        }</div></td></tr>`;
+        return row;
+      }).join('');
+    }
+    return projRow + msRows;
   }).join('');
 
   // Month markers
@@ -6658,9 +6898,17 @@ function buildPrintDocumentHtml(paper, orient, scope) {
   }
 
   const t = today();
-  const todayOffset = (t >= minDate && t <= maxDate)
+  const todayOffset = (incToday && t >= minDate && t <= maxDate)
     ? (daysBetween(minDate, t) / totalDays) * 100
     : null;
+
+  // Compute font size + row heights from scale
+  const baseFont = 8 * scale;       // pt
+  const headerFont = 7 * scale;
+  const projFont = 8 * scale;
+  const msFont = 7.5 * scale;
+  const rowPad = 3 * scale;          // pt
+  const rowHeight = 18 * scale;      // pt for bar track
 
   return `<!DOCTYPE html>
 <html><head>
@@ -6673,73 +6921,86 @@ function buildPrintDocumentHtml(paper, orient, scope) {
   body { padding: 0; }
   .header {
     display: flex; justify-content: space-between; align-items: baseline;
-    border-bottom: 2px solid #1a1410; padding-bottom: 6pt; margin-bottom: 10pt;
+    border-bottom: 2px solid #1a1410; padding-bottom: ${4*scale}pt; margin-bottom: ${8*scale}pt;
   }
-  .header h1 { font-size: 14pt; font-weight: 700; }
-  .header .meta { font-size: 9pt; color: #666; }
+  .header h1 { font-size: ${14*scale}pt; font-weight: 700; }
+  .header .meta { font-size: ${9*scale}pt; color: #666; }
   .month-bar {
-    position: relative; height: 14pt; border-bottom: 1px solid #aaa;
-    background: #ede3d2; margin-bottom: 0; font-size: 7pt;
+    position: relative; height: ${12*scale}pt; border-bottom: 1px solid #aaa;
+    background: #ede3d2; font-size: ${6.5*scale}pt;
   }
   .month-marker {
     position: absolute; top: 0; bottom: 0; border-left: 1px solid #999;
-    padding: 2pt 3pt 0 3pt; color: #333; white-space: nowrap;
+    padding: ${1.5*scale}pt ${2*scale}pt 0 ${2*scale}pt; color: #333; white-space: nowrap;
   }
   .today-line { position: absolute; top: 0; bottom: 0; width: 1.5pt; background: #c44; z-index: 5; }
   .today-line::before {
-    content: 'Today'; position: absolute; top: -10pt; left: -16pt;
-    font-size: 6pt; color: #c44; background: white; padding: 0 2pt;
+    content: 'Today'; position: absolute; top: -${8*scale}pt; left: -${14*scale}pt;
+    font-size: ${5.5*scale}pt; color: #c44; background: white; padding: 0 ${1.5*scale}pt;
   }
-  table { width: 100%; border-collapse: collapse; font-size: 8pt; }
+  table { width: 100%; border-collapse: collapse; font-size: ${baseFont}pt; table-layout: fixed; }
   thead th {
-    background: #f0e8dc; padding: 4pt; text-align: left;
-    border-bottom: 1px solid #999; font-weight: 600; font-size: 7pt;
+    background: #f0e8dc; padding: ${rowPad}pt ${rowPad+1}pt; text-align: left;
+    border-bottom: 1px solid #999; font-weight: 600; font-size: ${headerFont}pt;
     text-transform: uppercase; letter-spacing: 0.3px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  td { padding: 3pt 4pt; border-bottom: 1px solid #e8dfcc; vertical-align: middle; }
-  .proj-row td { font-weight: 600; background: #faf6ef; }
-  .ms-row td { font-size: 7.5pt; color: #444; }
-  .ms-row .c-name { padding-left: 14pt; }
-  .c-num { width: 70pt; color: #888; font-variant-numeric: tabular-nums; }
-  .c-name { width: 26%; }
-  .c-meta { width: 14%; color: #555; }
-  .c-bar { padding: 0; position: relative; }
-  .bar-track { position: relative; height: 18pt; background: #faf6ef; }
+  td { padding: ${rowPad}pt ${rowPad+1}pt; border-bottom: 1px solid #e8dfcc; vertical-align: middle;
+       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proj-row td { font-weight: 600; background: #faf6ef; font-size: ${projFont}pt; }
+  .ms-row td { font-size: ${msFont}pt; color: #444; }
+  .ms-row .c-name { padding-left: ${10*scale}pt; }
+  .c-num { color: #888; font-variant-numeric: tabular-nums; }
+  .c-client { color: #555; }
+  .c-mgr { color: #555; }
+  .c-due { color: #555; font-variant-numeric: tabular-nums; }
+  .c-bar { padding: 0 !important; position: relative; }
+  .bar-track { position: relative; height: ${rowHeight}pt; background: #faf6ef; }
   .proj-row .bar-track { background: #ede3d2; }
   .ms-dot {
-    position: absolute; top: 5pt; width: 8pt; height: 8pt;
+    position: absolute; top: ${rowHeight*0.25}pt; width: ${rowHeight*0.45}pt; height: ${rowHeight*0.45}pt;
     background: #a8554a; transform: translateX(-50%) rotate(45deg);
   }
   .ms-mark {
-    position: absolute; top: 2pt; transform: translateX(-50%);
-    display: flex; align-items: center; gap: 2pt; font-size: 7pt;
+    position: absolute; top: ${rowHeight*0.1}pt; transform: translateX(-50%);
+    display: flex; align-items: center; gap: ${1.5*scale}pt; font-size: ${msFont}pt;
     color: #444; white-space: nowrap;
   }
-  .ms-mark .d { color: #a8554a; font-size: 8pt; }
-  .ms-mark .t { background: rgba(255,255,255,0.85); padding: 0 2pt; }
+  .ms-mark .d { color: #a8554a; font-size: ${baseFont}pt; }
+  .ms-mark .t { background: rgba(255,255,255,0.85); padding: 0 ${1.5*scale}pt; }
   .proj-row, .ms-row { page-break-inside: avoid; }
 </style>
 </head>
 <body>
   <div class="header">
     <h1>VCA Schedule — ${viewLabel}</h1>
-    <div class="meta">${new Date().toLocaleDateString()} · ${visibleProjects.length} projects</div>
-  </div>
-  <div class="month-bar">
-    ${monthMarkers.join('')}
-    ${todayOffset !== null ? `<div class="today-line" style="left:${todayOffset}%;"></div>` : ''}
+    <div class="meta">${new Date().toLocaleDateString()} · ${visibleProjects.length} projects · ${minDate.toLocaleDateString()} – ${maxDate.toLocaleDateString()}</div>
   </div>
   <table>
+    <colgroup>
+      ${cols.includes('num') ? `<col style="width:${colWidthMap.num}%;">` : ''}
+      <col style="width:${colWidthMap.name}%;">
+      ${cols.includes('client') ? `<col style="width:${colWidthMap.client}%;">` : ''}
+      ${cols.includes('mgr') ? `<col style="width:${colWidthMap.mgr}%;">` : ''}
+      ${cols.includes('due') ? `<col style="width:${colWidthMap.due}%;">` : ''}
+      <col style="width:${barWidthPct}%;">
+    </colgroup>
     <thead>
       <tr>
-        <th class="c-num">#</th>
-        <th class="c-name">Project / Milestone</th>
-        <th class="c-meta">Client / Phase</th>
-        <th class="c-meta">Mgr / Assignees</th>
-        <th class="c-bar">Timeline (${minDate.toLocaleDateString()} – ${maxDate.toLocaleDateString()})</th>
+        ${cols.includes('num') ? `<th>#</th>` : ''}
+        <th>Project / Milestone</th>
+        ${cols.includes('client') ? `<th>Client / Phase</th>` : ''}
+        ${cols.includes('mgr') ? `<th>Mgr / Assignees</th>` : ''}
+        ${cols.includes('due') ? `<th>Due</th>` : ''}
+        <th>
+          <div class="month-bar">
+            ${monthMarkers.join('')}
+            ${todayOffset !== null ? `<div class="today-line" style="left:${todayOffset}%;"></div>` : ''}
+          </div>
+        </th>
       </tr>
     </thead>
-    <tbody>${rowsHtml || '<tr><td colspan="5" style="padding:20pt; text-align:center; color:#888;">No projects to print</td></tr>'}</tbody>
+    <tbody>${rowsHtml || '<tr><td colspan="6" style="padding:20pt; text-align:center; color:#888;">No projects to print</td></tr>'}</tbody>
   </table>
 </body></html>`;
 }
@@ -7833,7 +8094,7 @@ async function init() {
   });
   $('#workloadToday').addEventListener('click', scrollWorkloadToToday);
 
-  $('#addFilterBtn').addEventListener('click', openAddFilterMenu);
+  $('#addFilterBtn').addEventListener('click', openFilterPanel);
   $('#clearFiltersBtn').addEventListener('click', () => { STATE.filters = []; persistUiState(); renderAll(); });
   $('#sortBtn').addEventListener('click', (e) => {
     e.stopPropagation();
