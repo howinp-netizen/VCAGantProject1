@@ -6594,10 +6594,10 @@ function openPrintDialog() {
           </div>
 
           <div class="field-group" style="margin-bottom: 12px;">
-            <label class="field-label">Zoom <span id="printScaleLabel" style="color:var(--text-faint); font-size:10px;">(100%)</span></label>
-            <input type="range" id="printScale" min="60" max="160" value="100" step="5" style="width:100%;" />
+            <label class="field-label">Zoom <span id="printScaleLabel" style="color:var(--text-faint); font-size:10px;">(85%)</span></label>
+            <input type="range" id="printScale" min="40" max="160" value="85" step="5" style="width:100%;" />
             <div style="display:flex; justify-content:space-between; font-size:9px; color:var(--text-faint);">
-              <span>Smaller</span><span>Larger</span>
+              <span>40% (dense)</span><span>160% (large)</span>
             </div>
           </div>
 
@@ -6610,13 +6610,16 @@ function openPrintDialog() {
           </div>
 
           <div class="field-group" style="margin-bottom: 12px;">
-            <label class="field-label">Columns</label>
-            <div style="display:flex; flex-direction:column; gap:4px; font-size:11px;">
+            <label class="field-label">Columns to show</label>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:4px 8px; font-size:11px;">
               <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="num" checked /> Project #</label>
-              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="name" checked disabled /> Project / Milestone (always)</label>
-              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="client" checked /> Client / Phase</label>
-              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="mgr" checked /> Mgr / Assignees</label>
-              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="due" /> Due Date column</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="name" checked disabled /> Name</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="client" checked /> Client</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="phase" /> Phase</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="mgr" checked /> Mgr</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="assignees" /> Assignees</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="status" /> Status</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="due" /> Due</label>
             </div>
           </div>
 
@@ -6772,8 +6775,9 @@ function doPrintViaIframe(opts) {
 }
 
 // Build a complete, self-contained printable HTML document. Returns a
-// string. Layout: a header, a month bar, then a table of rows for each
-// project + its milestones. Page breaks happen naturally between rows.
+// string. Layout: a header, a single table where the timeline column has
+// month markers across the top and a vertical "today" line that spans every
+// row. Page breaks happen naturally between rows.
 function buildPrintDocumentHtml(opts) {
   // Backward-compat: if called with positional args, normalize
   if (typeof opts === 'string') {
@@ -6782,8 +6786,8 @@ function buildPrintDocumentHtml(opts) {
   const paper  = opts.paper  || 'letter';
   const orient = opts.orient || 'landscape';
   const scope  = opts.scope  || 'current';
-  const scale  = opts.scale  || 1;
-  const barWidth = opts.barWidth || 0.6;  // fraction of row width devoted to Gantt bar
+  const scale  = opts.scale  || 0.85;
+  const barWidth = opts.barWidth || 0.6;
   const cols   = opts.cols   || ['num', 'name', 'client', 'mgr'];
   const incMilestoneRows = opts.incMilestoneRows !== false;
   const incToday = opts.incToday !== false;
@@ -6821,24 +6825,40 @@ function buildPrintDocumentHtml(opts) {
     : STATE.view === 'workload' ? 'Workload'
     : 'Schedule';
 
-  // Compute column widths. Info columns share (1 - barWidth) of the row.
-  // The "name" column gets ~50% of the info side; others split the rest.
+  // Column weights for layout
+  const weights = {
+    num:       0.10,
+    name:      0.40,
+    client:    0.16,
+    phase:     0.12,
+    mgr:       0.10,
+    assignees: 0.16,
+    status:    0.10,
+    due:       0.10,
+  };
+  const headers = {
+    num:       '#',
+    name:      'Project / Milestone',
+    client:    'Client',
+    phase:     'Phase',
+    mgr:       'Mgr',
+    assignees: 'Assignees',
+    status:    'Status',
+    due:       'Due',
+  };
   const infoCols = cols.filter(c => c !== 'bar');
   const infoFrac = 1 - barWidth;
-  const colWidthMap = {};
-  // weights
-  const weights = { num: 0.18, name: 0.42, client: 0.18, mgr: 0.18, due: 0.12 };
   let totalWeight = 0;
-  for (const c of infoCols) totalWeight += (weights[c] || 0.15);
+  for (const c of infoCols) totalWeight += (weights[c] || 0.12);
+  const colWidthMap = {};
   for (const c of infoCols) {
-    colWidthMap[c] = ((weights[c] || 0.15) / totalWeight) * infoFrac * 100;
+    colWidthMap[c] = ((weights[c] || 0.12) / totalWeight) * infoFrac * 100;
   }
   const barWidthPct = barWidth * 100;
 
-  // Build rows
-  const rowsHtml = visibleProjects.map(p => {
+  // Project + milestone row helpers
+  const renderProjectRow = (p, milestones) => {
     const mgr = getEngineer(p.managerId);
-    const milestones = (p.milestones || []).filter(m => milestonePassesFilters(m));
     const projBarHtml = milestones.map(m => {
       if (!m.dueDate) return '';
       const d = parseDate(m.dueDate);
@@ -6846,46 +6866,72 @@ function buildPrintDocumentHtml(opts) {
       const left = (daysBetween(minDate, d) / totalDays) * 100;
       return `<div class="ms-dot" style="left:${left}%;" title="${escapeHtml(m.name)}"></div>`;
     }).join('');
-
-    const cell = (col, content) => {
+    const cellFor = (col) => {
       if (!cols.includes(col)) return '';
-      return `<td class="c-${col}" style="width:${colWidthMap[col]}%;">${content}</td>`;
+      let v = '';
+      switch (col) {
+        case 'num':       v = p.number || ''; break;
+        case 'name':      v = p.name; break;
+        case 'client':    v = p.client || ''; break;
+        case 'phase':     v = ''; break;
+        case 'mgr':       v = mgr ? abbreviateName(mgr.name) : ''; break;
+        case 'assignees': v = ''; break;
+        case 'status':    {
+          const st = STATE.data.statuses.find(s => s.id === p.statusId);
+          v = st ? st.name : ''; break;
+        }
+        case 'due':       v = ''; break;
+      }
+      return `<td class="c-${col}">${escapeHtml(v)}</td>`;
     };
+    return `<tr class="proj-row">
+      ${cols.map(c => cellFor(c)).join('')}
+      <td class="c-bar"><div class="bar-track">${projBarHtml}</div></td>
+    </tr>`;
+  };
 
-    let projRow = `<tr class="proj-row">`;
-    if (cols.includes('num')) projRow += `<td class="c-num" style="width:${colWidthMap.num}%;">${escapeHtml(p.number || '')}</td>`;
-    projRow += `<td class="c-name" style="width:${colWidthMap.name}%;">${escapeHtml(p.name)}</td>`;
-    if (cols.includes('client')) projRow += `<td class="c-client" style="width:${colWidthMap.client}%;">${escapeHtml(p.client || '')}</td>`;
-    if (cols.includes('mgr')) projRow += `<td class="c-mgr" style="width:${colWidthMap.mgr}%;">${mgr ? escapeHtml(mgr.name) : ''}</td>`;
-    if (cols.includes('due')) projRow += `<td class="c-due" style="width:${colWidthMap.due}%;"></td>`;
-    projRow += `<td class="c-bar" style="width:${barWidthPct}%;"><div class="bar-track">${projBarHtml}</div></td></tr>`;
+  const renderMilestoneRow = (p, m) => {
+    const cat = STATE.data.categories.find(c => c.id === m.categoryId);
+    const status = STATE.data.statuses.find(s => s.id === m.statusId);
+    const mgr = getEngineer(p.managerId);
+    const assigneeNames = (m.assigneeIds || []).map(id => {
+      const e = getEngineer(id); return e ? abbreviateName(e.name) : '';
+    }).filter(Boolean).join(', ');
+    const d = m.dueDate ? parseDate(m.dueDate) : null;
+    const left = d ? (daysBetween(minDate, d) / totalDays) * 100 : 0;
+    const cellFor = (col) => {
+      if (!cols.includes(col)) return '';
+      let v = '';
+      switch (col) {
+        case 'num':       v = ''; break;
+        case 'name':      return `<td class="c-name ms-cell">  ◆ ${escapeHtml(m.name)}</td>`;
+        case 'client':    v = ''; break;
+        case 'phase':     v = cat ? cat.name : ''; break;
+        case 'mgr':       v = ''; break;
+        case 'assignees': v = assigneeNames; break;
+        case 'status':    v = status ? status.name : ''; break;
+        case 'due':       v = m.dueDate || ''; break;
+      }
+      return `<td class="c-${col}">${escapeHtml(v)}</td>`;
+    };
+    return `<tr class="ms-row">
+      ${cols.map(c => cellFor(c)).join('')}
+      <td class="c-bar"><div class="bar-track">${
+        d ? `<div class="ms-mark" style="left:${left}%;"><span class="d">◆</span><span class="t">${escapeHtml(m.dueDate)}${status ? ' · ' + escapeHtml(status.name) : ''}</span></div>` : ''
+      }</div></td>
+    </tr>`;
+  };
 
-    let msRows = '';
+  const rowsHtml = visibleProjects.map(p => {
+    const milestones = (p.milestones || []).filter(m => milestonePassesFilters(m));
+    let r = renderProjectRow(p, milestones);
     if (incMilestoneRows) {
-      msRows = milestones.map(m => {
-        const cat = STATE.data.categories.find(c => c.id === m.categoryId);
-        const status = STATE.data.statuses.find(s => s.id === m.statusId);
-        const assignees = (m.assigneeIds || []).map(id => {
-          const e = getEngineer(id); return e ? abbreviateName(e.name) : '';
-        }).filter(Boolean).join(', ');
-        const d = m.dueDate ? parseDate(m.dueDate) : null;
-        const left = d ? (daysBetween(minDate, d) / totalDays) * 100 : 0;
-        let row = `<tr class="ms-row">`;
-        if (cols.includes('num')) row += `<td class="c-num"></td>`;
-        row += `<td class="c-name">  ◆ ${escapeHtml(m.name)}</td>`;
-        if (cols.includes('client')) row += `<td class="c-client">${escapeHtml(cat ? cat.name : '')}</td>`;
-        if (cols.includes('mgr')) row += `<td class="c-mgr">${escapeHtml(assignees)}</td>`;
-        if (cols.includes('due')) row += `<td class="c-due">${escapeHtml(m.dueDate || '')}</td>`;
-        row += `<td class="c-bar"><div class="bar-track">${
-          d ? `<div class="ms-mark" style="left:${left}%;"><span class="d">◆</span><span class="t">${escapeHtml(m.dueDate)}${status ? ' · ' + escapeHtml(status.name) : ''}</span></div>` : ''
-        }</div></td></tr>`;
-        return row;
-      }).join('');
+      r += milestones.map(m => renderMilestoneRow(p, m)).join('');
     }
-    return projRow + msRows;
+    return r;
   }).join('');
 
-  // Month markers
+  // Month markers (rendered into the timeline column header)
   let cur = new Date(minDate.getFullYear(), minDate.getMonth(), 1);
   const monthMarkers = [];
   while (cur <= maxDate) {
@@ -6898,76 +6944,100 @@ function buildPrintDocumentHtml(opts) {
   }
 
   const t = today();
-  const todayOffset = (incToday && t >= minDate && t <= maxDate)
+  // Today's left position within the timeline column (in %).
+  const todayPctInBar = (incToday && t >= minDate && t <= maxDate)
     ? (daysBetween(minDate, t) / totalDays) * 100
     : null;
 
-  // Compute font size + row heights from scale
-  const baseFont = 8 * scale;       // pt
-  const headerFont = 7 * scale;
-  const projFont = 8 * scale;
-  const msFont = 7.5 * scale;
-  const rowPad = 3 * scale;          // pt
-  const rowHeight = 18 * scale;      // pt for bar track
+  // Compute font sizes from scale. With scale = 0.85 these are around
+  // 6.5pt body / 5.5pt small — small enough to fit a busy schedule on
+  // one Letter sheet but still legible.
+  const baseFont   = (8.5 * scale).toFixed(2);
+  const headerFont = (7.0 * scale).toFixed(2);
+  const projFont   = (8.5 * scale).toFixed(2);
+  const msFont     = (7.5 * scale).toFixed(2);
+  const tinyFont   = (6.0 * scale).toFixed(2);
+  const rowPad     = (2.2 * scale).toFixed(2);
+  const rowHeight  = (16.0 * scale).toFixed(2);
 
   return `<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8">
 <title>VCA Schedule — Print</title>
 <style>
-  @page { size: ${pageW}in ${pageH}in; margin: 0.4in; }
+  @page { size: ${pageW}in ${pageH}in; margin: 0.35in; }
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   html, body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #1a1410; background: white; }
   body { padding: 0; }
   .header {
     display: flex; justify-content: space-between; align-items: baseline;
-    border-bottom: 2px solid #1a1410; padding-bottom: ${4*scale}pt; margin-bottom: ${8*scale}pt;
+    border-bottom: 1.5px solid #1a1410; padding-bottom: ${(3*scale).toFixed(2)}pt;
+    margin-bottom: ${(5*scale).toFixed(2)}pt;
   }
-  .header h1 { font-size: ${14*scale}pt; font-weight: 700; }
-  .header .meta { font-size: ${9*scale}pt; color: #666; }
-  .month-bar {
-    position: relative; height: ${12*scale}pt; border-bottom: 1px solid #aaa;
-    background: #ede3d2; font-size: ${6.5*scale}pt;
-  }
-  .month-marker {
-    position: absolute; top: 0; bottom: 0; border-left: 1px solid #999;
-    padding: ${1.5*scale}pt ${2*scale}pt 0 ${2*scale}pt; color: #333; white-space: nowrap;
-  }
-  .today-line { position: absolute; top: 0; bottom: 0; width: 1.5pt; background: #c44; z-index: 5; }
-  .today-line::before {
-    content: 'Today'; position: absolute; top: -${8*scale}pt; left: -${14*scale}pt;
-    font-size: ${5.5*scale}pt; color: #c44; background: white; padding: 0 ${1.5*scale}pt;
-  }
-  table { width: 100%; border-collapse: collapse; font-size: ${baseFont}pt; table-layout: fixed; }
+  .header h1 { font-size: ${(13*scale).toFixed(2)}pt; font-weight: 700; }
+  .header .meta { font-size: ${(8*scale).toFixed(2)}pt; color: #666; }
+
+  .table-wrap { position: relative; }
+  table { width: 100%; border-collapse: collapse; font-size: ${baseFont}pt; table-layout: fixed; position: relative; }
   thead th {
-    background: #f0e8dc; padding: ${rowPad}pt ${rowPad+1}pt; text-align: left;
-    border-bottom: 1px solid #999; font-weight: 600; font-size: ${headerFont}pt;
+    background: #f0e8dc; padding: ${rowPad}pt ${(parseFloat(rowPad)+1).toFixed(2)}pt;
+    text-align: left; border-bottom: 1px solid #999;
+    font-weight: 600; font-size: ${headerFont}pt;
     text-transform: uppercase; letter-spacing: 0.3px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  td { padding: ${rowPad}pt ${rowPad+1}pt; border-bottom: 1px solid #e8dfcc; vertical-align: middle;
+  td { padding: ${rowPad}pt ${(parseFloat(rowPad)+1).toFixed(2)}pt;
+       border-bottom: 1px solid #e8dfcc; vertical-align: middle;
        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .proj-row td { font-weight: 600; background: #faf6ef; font-size: ${projFont}pt; }
   .ms-row td { font-size: ${msFont}pt; color: #444; }
-  .ms-row .c-name { padding-left: ${10*scale}pt; }
+  .ms-row .ms-cell { padding-left: ${(8*scale).toFixed(2)}pt; }
   .c-num { color: #888; font-variant-numeric: tabular-nums; }
-  .c-client { color: #555; }
-  .c-mgr { color: #555; }
-  .c-due { color: #555; font-variant-numeric: tabular-nums; }
+  .c-client, .c-phase, .c-mgr, .c-assignees, .c-status { color: #555; }
+  .c-due { color: #555; font-variant-numeric: tabular-nums; font-size: ${tinyFont}pt; }
   .c-bar { padding: 0 !important; position: relative; }
   .bar-track { position: relative; height: ${rowHeight}pt; background: #faf6ef; }
   .proj-row .bar-track { background: #ede3d2; }
   .ms-dot {
-    position: absolute; top: ${rowHeight*0.25}pt; width: ${rowHeight*0.45}pt; height: ${rowHeight*0.45}pt;
+    position: absolute; top: ${(parseFloat(rowHeight)*0.27).toFixed(2)}pt;
+    width: ${(parseFloat(rowHeight)*0.4).toFixed(2)}pt;
+    height: ${(parseFloat(rowHeight)*0.4).toFixed(2)}pt;
     background: #a8554a; transform: translateX(-50%) rotate(45deg);
   }
   .ms-mark {
-    position: absolute; top: ${rowHeight*0.1}pt; transform: translateX(-50%);
-    display: flex; align-items: center; gap: ${1.5*scale}pt; font-size: ${msFont}pt;
-    color: #444; white-space: nowrap;
+    position: absolute; top: ${(parseFloat(rowHeight)*0.1).toFixed(2)}pt;
+    transform: translateX(-50%);
+    display: flex; align-items: center; gap: ${(1.2*scale).toFixed(2)}pt;
+    font-size: ${msFont}pt; color: #444; white-space: nowrap;
   }
   .ms-mark .d { color: #a8554a; font-size: ${baseFont}pt; }
-  .ms-mark .t { background: rgba(255,255,255,0.85); padding: 0 ${1.5*scale}pt; }
+  .ms-mark .t { background: rgba(255,255,255,0.92); padding: 0 ${(1.2*scale).toFixed(2)}pt; }
+
+  /* Month bar — sits in the timeline column header */
+  .month-bar {
+    position: relative; height: ${(parseFloat(rowHeight)*0.7).toFixed(2)}pt;
+    background: #ede3d2; font-size: ${tinyFont}pt;
+    margin: -${rowPad}pt -${(parseFloat(rowPad)+1).toFixed(2)}pt;
+  }
+  .month-marker {
+    position: absolute; top: 0; bottom: 0; border-left: 1px solid #999;
+    padding: ${(1.2*scale).toFixed(2)}pt ${(1.5*scale).toFixed(2)}pt 0 ${(1.5*scale).toFixed(2)}pt;
+    color: #333; white-space: nowrap;
+  }
+
+  /* The today line: a thin vertical line spanning the whole timeline
+     COLUMN top to bottom. Drawn with an absolutely-positioned div placed
+     by the script, sized via the script too. */
+  .today-line {
+    position: absolute; top: 0; bottom: 0; width: 1pt;
+    background: #c44; z-index: 10; pointer-events: none;
+  }
+  .today-line::before {
+    content: 'Today'; position: absolute; top: 0; left: ${(2*scale).toFixed(2)}pt;
+    font-size: ${tinyFont}pt; color: #c44; background: white;
+    padding: 0 ${(1.2*scale).toFixed(2)}pt; font-weight: 600;
+  }
+
   .proj-row, .ms-row { page-break-inside: avoid; }
 </style>
 </head>
@@ -6976,32 +7046,43 @@ function buildPrintDocumentHtml(opts) {
     <h1>VCA Schedule — ${viewLabel}</h1>
     <div class="meta">${new Date().toLocaleDateString()} · ${visibleProjects.length} projects · ${minDate.toLocaleDateString()} – ${maxDate.toLocaleDateString()}</div>
   </div>
-  <table>
-    <colgroup>
-      ${cols.includes('num') ? `<col style="width:${colWidthMap.num}%;">` : ''}
-      <col style="width:${colWidthMap.name}%;">
-      ${cols.includes('client') ? `<col style="width:${colWidthMap.client}%;">` : ''}
-      ${cols.includes('mgr') ? `<col style="width:${colWidthMap.mgr}%;">` : ''}
-      ${cols.includes('due') ? `<col style="width:${colWidthMap.due}%;">` : ''}
-      <col style="width:${barWidthPct}%;">
-    </colgroup>
-    <thead>
-      <tr>
-        ${cols.includes('num') ? `<th>#</th>` : ''}
-        <th>Project / Milestone</th>
-        ${cols.includes('client') ? `<th>Client / Phase</th>` : ''}
-        ${cols.includes('mgr') ? `<th>Mgr / Assignees</th>` : ''}
-        ${cols.includes('due') ? `<th>Due</th>` : ''}
-        <th>
-          <div class="month-bar">
-            ${monthMarkers.join('')}
-            ${todayOffset !== null ? `<div class="today-line" style="left:${todayOffset}%;"></div>` : ''}
-          </div>
-        </th>
-      </tr>
-    </thead>
-    <tbody>${rowsHtml || '<tr><td colspan="6" style="padding:20pt; text-align:center; color:#888;">No projects to print</td></tr>'}</tbody>
-  </table>
+  <div class="table-wrap" id="tableWrap">
+    <table id="printTable">
+      <colgroup>
+        ${cols.map(c => `<col style="width:${colWidthMap[c]}%;">`).join('')}
+        <col style="width:${barWidthPct}%;">
+      </colgroup>
+      <thead>
+        <tr>
+          ${cols.map(c => `<th>${headers[c]}</th>`).join('')}
+          <th class="c-bar"><div class="month-bar">${monthMarkers.join('')}</div></th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml || '<tr><td colspan="' + (cols.length + 1) + '" style="padding:20pt; text-align:center; color:#888;">No projects to print</td></tr>'}</tbody>
+    </table>
+  </div>
+  <scr` + `ipt>
+    // Draw today line that spans the whole timeline column (header + all rows).
+    (function() {
+      ${todayPctInBar !== null ? `
+      const wrap = document.getElementById('tableWrap');
+      const table = document.getElementById('printTable');
+      if (!wrap || !table) return;
+      // Find the timeline column header to compute its left + width
+      const headers = table.querySelectorAll('thead th');
+      const barTh = headers[headers.length - 1];
+      if (!barTh) return;
+      const tableRect = table.getBoundingClientRect();
+      const barRect = barTh.getBoundingClientRect();
+      const leftPx = (barRect.left - tableRect.left) + (barRect.width * ${todayPctInBar / 100});
+      const line = document.createElement('div');
+      line.className = 'today-line';
+      line.style.left = leftPx + 'px';
+      line.style.height = table.offsetHeight + 'px';
+      wrap.appendChild(line);
+      ` : ''}
+    })();
+  </scr` + `ipt>
 </body></html>`;
 }
 
