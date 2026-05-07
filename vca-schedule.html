@@ -6745,9 +6745,23 @@ function doPrintViaIframe(opts) {
   }
   const old = document.getElementById('printIframe');
   if (old) old.remove();
+
+  // Compute the page dimensions in CSS pixels (96 DPI). Sizing the iframe
+  // to match the printed page width means the document lays out the same
+  // way the printer will render it — no surprises like an iframe rendered
+  // at 1024px wide and then squeezed onto an 8.5" sheet, which causes
+  // bars to stretch and percentage offsets to land in unexpected places.
+  const dims = { letter: [8.5, 11], tabloid: [11, 17] }[opts.paper] || [8.5, 11];
+  let pageW = dims[0], pageH = dims[1];
+  if (opts.orient === 'landscape') [pageW, pageH] = [pageH, pageW];
+  const cssW = Math.round(pageW * 96);
+  const cssH = Math.round(pageH * 96);
+
   const iframe = document.createElement('iframe');
   iframe.id = 'printIframe';
-  iframe.style.cssText = 'position:fixed; right:0; bottom:0; width:0; height:0; border:0; visibility:hidden;';
+  // Position off-screen but at correct logical size — visibility:hidden
+  // keeps it from being seen, but layout still happens normally.
+  iframe.style.cssText = `position:fixed; left:-${cssW + 100}px; top:0; width:${cssW}px; height:${cssH}px; border:0; visibility:hidden;`;
   document.body.appendChild(iframe);
   setTimeout(() => {
     try {
@@ -6765,7 +6779,7 @@ function doPrintViaIframe(opts) {
           toast('Print failed: ' + e.message, 'error');
         }
         setTimeout(() => { iframe.remove(); }, 60000);
-      }, 350);
+      }, 400);
     } catch (e) {
       console.error('[print] iframe write failed', e);
       toast('Print failed to render: ' + e.message, 'error');
@@ -6943,10 +6957,20 @@ function buildPrintDocumentHtml(opts) {
     cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
   }
 
+  // Today's left position WITHIN the entire table (in %).
   const t = today();
-  // Today's left position within the timeline column (in %).
+  // The timeline column starts at (1 - barWidth) of the full table width
+  // and spans barWidth of it. So:
+  //   table-relative-left = (1 - barWidth)*100  +  todayPctInBar * barWidth
+  // We compute this in pure CSS so the iframe doesn't need to be visible
+  // (or even painted) for the position to be correct — fixes the print
+  // case where the print iframe was sized 0×0 and JS measurements all
+  // returned 0, snapping the line to left:0.
   const todayPctInBar = (incToday && t >= minDate && t <= maxDate)
     ? (daysBetween(minDate, t) / totalDays) * 100
+    : null;
+  const todayPctInTable = (todayPctInBar !== null)
+    ? ((1 - barWidth) * 100) + (todayPctInBar / 100) * barWidth * 100
     : null;
 
   // Compute font sizes from scale. With scale = 0.85 these are around
@@ -6978,7 +7002,24 @@ function buildPrintDocumentHtml(opts) {
   .header .meta { font-size: ${(8*scale).toFixed(2)}pt; color: #666; }
 
   .table-wrap { position: relative; }
-  table { width: 100%; border-collapse: collapse; font-size: ${baseFont}pt; table-layout: fixed; position: relative; }
+
+  /* Today line — pure CSS positioning. Sits absolutely inside .table-wrap
+     (which is the table's container), spanning from top of the header all
+     the way down to the bottom of the last row. Its left is computed as
+     a percentage of the table-wrap's width — independent of any DOM
+     measurement, so it works correctly inside hidden print iframes. */
+  .today-line {
+    position: absolute; top: 0; bottom: 0; width: 1pt;
+    background: #c44; z-index: 10; pointer-events: none;
+  }
+  .today-line::before {
+    content: 'Today'; position: absolute; top: 0; left: ${(2*scale).toFixed(2)}pt;
+    font-size: ${tinyFont}pt; color: #c44; background: white;
+    padding: 0 ${(1.2*scale).toFixed(2)}pt; font-weight: 600;
+    white-space: nowrap;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: ${baseFont}pt; table-layout: fixed; }
   thead th {
     background: #f0e8dc; padding: ${rowPad}pt ${(parseFloat(rowPad)+1).toFixed(2)}pt;
     text-align: left; border-bottom: 1px solid #999;
@@ -7025,19 +7066,6 @@ function buildPrintDocumentHtml(opts) {
     color: #333; white-space: nowrap;
   }
 
-  /* The today line: a thin vertical line spanning the whole timeline
-     COLUMN top to bottom. Drawn with an absolutely-positioned div placed
-     by the script, sized via the script too. */
-  .today-line {
-    position: absolute; top: 0; bottom: 0; width: 1pt;
-    background: #c44; z-index: 10; pointer-events: none;
-  }
-  .today-line::before {
-    content: 'Today'; position: absolute; top: 0; left: ${(2*scale).toFixed(2)}pt;
-    font-size: ${tinyFont}pt; color: #c44; background: white;
-    padding: 0 ${(1.2*scale).toFixed(2)}pt; font-weight: 600;
-  }
-
   .proj-row, .ms-row { page-break-inside: avoid; }
 </style>
 </head>
@@ -7047,6 +7075,7 @@ function buildPrintDocumentHtml(opts) {
     <div class="meta">${new Date().toLocaleDateString()} · ${visibleProjects.length} projects · ${minDate.toLocaleDateString()} – ${maxDate.toLocaleDateString()}</div>
   </div>
   <div class="table-wrap" id="tableWrap">
+    ${todayPctInTable !== null ? `<div class="today-line" style="left:${todayPctInTable}%;"></div>` : ''}
     <table id="printTable">
       <colgroup>
         ${cols.map(c => `<col style="width:${colWidthMap[c]}%;">`).join('')}
@@ -7061,28 +7090,6 @@ function buildPrintDocumentHtml(opts) {
       <tbody>${rowsHtml || '<tr><td colspan="' + (cols.length + 1) + '" style="padding:20pt; text-align:center; color:#888;">No projects to print</td></tr>'}</tbody>
     </table>
   </div>
-  <scr` + `ipt>
-    // Draw today line that spans the whole timeline column (header + all rows).
-    (function() {
-      ${todayPctInBar !== null ? `
-      const wrap = document.getElementById('tableWrap');
-      const table = document.getElementById('printTable');
-      if (!wrap || !table) return;
-      // Find the timeline column header to compute its left + width
-      const headers = table.querySelectorAll('thead th');
-      const barTh = headers[headers.length - 1];
-      if (!barTh) return;
-      const tableRect = table.getBoundingClientRect();
-      const barRect = barTh.getBoundingClientRect();
-      const leftPx = (barRect.left - tableRect.left) + (barRect.width * ${todayPctInBar / 100});
-      const line = document.createElement('div');
-      line.className = 'today-line';
-      line.style.left = leftPx + 'px';
-      line.style.height = table.offsetHeight + 'px';
-      wrap.appendChild(line);
-      ` : ''}
-    })();
-  </scr` + `ipt>
 </body></html>`;
 }
 
