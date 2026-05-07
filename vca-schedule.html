@@ -2432,42 +2432,73 @@ const FILTER_TYPES = {
 };
 
 function projectPassesFilters(p) {
+  // Group filters by type. Within a single type, multiple values combine
+  // with OR (selecting both Manager A and Manager B should show projects
+  // managed by either). Across different types they combine with AND
+  // (Manager A AND Status Active = projects matching both).
+  const byType = {};
   for (const f of STATE.filters) {
-    if (f.type === 'project_status') {
-      const st = getStatus(p.statusId);
-      const isCompleted = st.isCompleted;
-      const isActive = st.isActive;
-      const isOnHold = !!st.name?.toLowerCase().includes('hold');
-      const isNotStarted = !isCompleted && !isActive && !isOnHold;
-      if (f.value === 'active' && !isActive) return false;
-      if (f.value === 'completed' && !isCompleted) return false;
-      if (f.value === 'onhold' && !isOnHold) return false;
-      if (f.value === 'notstarted' && !isNotStarted) return false;
-    }
-    if (f.type === 'manager' && p.managerId !== f.value) return false;
-    if (f.type === 'client' && (p.client || '') !== f.value) return false;
-    if (f.type === 'hide_completed' && f.value === 'projects') {
-      const st = getStatus(p.statusId);
-      if (st.isCompleted) return false;
-    }
-    // "All milestones complete" — hide projects where every milestone has
-    // a completed status (and the project has at least one milestone).
-    if (f.type === 'hide_all_milestones_complete') {
-      const ms = p.milestones || [];
-      if (ms.length > 0 && ms.every(m => (getStatus(m.statusId) || {}).isCompleted)) {
-        return false;
+    (byType[f.type] || (byType[f.type] = [])).push(f.value);
+  }
+
+  // Helper: does the project match ANY value in this type's list?
+  const checkType = (type, predicate) => {
+    const values = byType[type];
+    if (!values || values.length === 0) return true;
+    return values.some(predicate);
+  };
+
+  // project_status — value is one of: active/completed/onhold/notstarted
+  if (!checkType('project_status', (v) => {
+    const st = getStatus(p.statusId);
+    const isCompleted = st.isCompleted;
+    const isActive = st.isActive;
+    const isOnHold = !!st.name?.toLowerCase().includes('hold');
+    const isNotStarted = !isCompleted && !isActive && !isOnHold;
+    if (v === 'active') return isActive;
+    if (v === 'completed') return isCompleted;
+    if (v === 'onhold') return isOnHold;
+    if (v === 'notstarted') return isNotStarted;
+    return false;
+  })) return false;
+
+  // manager — project's manager must be one of the selected
+  if (!checkType('manager', (v) => p.managerId === v)) return false;
+
+  // client — project's client must be one of the selected
+  if (!checkType('client', (v) => (p.client || '') === v)) return false;
+
+  // hide_completed (single-value-style filter, kept for compat). Treated as
+  // AND across whatever values exist (typically just 'projects').
+  if (byType.hide_completed) {
+    for (const v of byType.hide_completed) {
+      if (v === 'projects') {
+        const st = getStatus(p.statusId);
+        if (st.isCompleted) return false;
       }
-    }
-    if (f.type === 'engineer') {
-      let found = false;
-      for (const m of (p.milestones || [])) {
-        if ((m.assigneeIds || []).includes(f.value)) { found = true; break; }
-        if ((m.tasks || []).some(t => t.assigneeId === f.value)) { found = true; break; }
-      }
-      if (!found) return false;
     }
   }
-  // search filter
+
+  // hide_all_milestones_complete — single behavior, just present-or-not
+  if (byType.hide_all_milestones_complete) {
+    const ms = p.milestones || [];
+    if (ms.length > 0 && ms.every(m => (getStatus(m.statusId) || {}).isCompleted)) {
+      return false;
+    }
+  }
+
+  // engineer (Assignee) — at least one milestone or task assigned to ANY
+  // of the selected engineers. With multiple engineers selected, this is
+  // an OR: project shown if assigned to engineer A OR engineer B.
+  if (!checkType('engineer', (v) => {
+    for (const m of (p.milestones || [])) {
+      if ((m.assigneeIds || []).includes(v)) return true;
+      if ((m.tasks || []).some(t => t.assigneeId === v)) return true;
+    }
+    return false;
+  })) return false;
+
+  // search filter — applied on top of all type filters
   if (STATE.searchQuery) {
     const q = STATE.searchQuery.toLowerCase();
     const projectMatch = p.name.toLowerCase().includes(q) || (p.client || '').toLowerCase().includes(q) || (p.number || '').toLowerCase().includes(q);
@@ -2509,37 +2540,47 @@ function milestonePassesFilters(m) {
   // Visibility check first — drafters never see private/engineer-only milestones
   if (!canSeeMilestone(m)) return false;
 
+  // Group filters by type — same type = OR, different types = AND.
+  const byType = {};
   for (const f of STATE.filters) {
-    if (f.type === 'milestone_status' && m.statusId !== f.value) return false;
-    if (f.type === 'category' && m.categoryId !== f.value) return false;
-    if (f.type === 'hide_completed' && f.value === 'milestones') {
-      const st = getStatus(m.statusId);
-      if (st.isCompleted) return false;
-    }
-    if (f.type === 'engineer') {
-      const inAssign = (m.assigneeIds || []).includes(f.value);
-      const inTask = (m.tasks || []).some(t => t.assigneeId === f.value);
-      if (!inAssign && !inTask) return false;
-    }
-    if (f.type === 'visibility' && (m.visibility || 'shared') !== f.value) return false;
-    if (f.type === 'due_range') {
-      if (!m.dueDate) return false;
-      const d = parseDate(m.dueDate);
-      const t = today();
-      const diff = daysBetween(t, d);
-      if (f.value === 'overdue' && diff >= 0) return false;
-      if (f.value !== 'overdue') {
-        const days = parseInt(f.value);
-        if (diff < 0 || diff > days) return false;
+    (byType[f.type] || (byType[f.type] = [])).push(f.value);
+  }
+  const checkType = (type, predicate) => {
+    const values = byType[type];
+    if (!values || values.length === 0) return true;
+    return values.some(predicate);
+  };
+
+  if (!checkType('milestone_status', (v) => m.statusId === v)) return false;
+  if (!checkType('category', (v) => m.categoryId === v)) return false;
+  if (byType.hide_completed) {
+    for (const v of byType.hide_completed) {
+      if (v === 'milestones') {
+        const st = getStatus(m.statusId);
+        if (st.isCompleted) return false;
       }
     }
   }
+  if (!checkType('engineer', (v) => {
+    const inAssign = (m.assigneeIds || []).includes(v);
+    const inTask = (m.tasks || []).some(t => t.assigneeId === v);
+    return inAssign || inTask;
+  })) return false;
+  if (!checkType('visibility', (v) => (m.visibility || 'shared') === v)) return false;
+  if (!checkType('due_range', (v) => {
+    if (!m.dueDate) return false;
+    const d = parseDate(m.dueDate);
+    const t = today();
+    const diff = daysBetween(t, d);
+    if (v === 'overdue') return diff < 0;
+    const days = parseInt(v);
+    return diff >= 0 && diff <= days;
+  })) return false;
+
   // search
   if (STATE.searchQuery) {
     const q = STATE.searchQuery.toLowerCase();
-    // milestone passes if it matches OR its parent project matches
     if (m.name.toLowerCase().includes(q)) return true;
-    // we don't have the parent here; rely on project filter
     return true;
   }
   return true;
@@ -2550,14 +2591,12 @@ function milestonePassesFilters(m) {
 // is the engineer ("My Milestones") filter: when active, we hide tasks
 // assigned to other people so the user only sees their own work, even if
 // the parent milestone is shown because it happens to contain a task of
-// theirs alongside others.
+// theirs alongside others. With multiple engineers selected, OR semantics
+// — the task is shown if assigned to any of them.
 function taskPassesFilters(t) {
-  for (const f of STATE.filters) {
-    if (f.type === 'engineer') {
-      if (t.assigneeId !== f.value) return false;
-    }
-  }
-  return true;
+  const engValues = STATE.filters.filter(f => f.type === 'engineer').map(f => f.value);
+  if (engValues.length === 0) return true;
+  return engValues.includes(t.assigneeId);
 }
 
 function renderFilterBar() {
@@ -3641,7 +3680,10 @@ function openSortPopup(anchor) {
       const key = item.dataset.sortKey;
       if (STATE.projectSort === key) { closePopup(); return; }
       STATE.projectSort = key;
-      saveData();
+      // Sort is per-viewer (everyone may want a different order). Save to
+      // local cache + user prefs, NOT to the shared schedule document.
+      saveLocal();
+      scheduleUserPrefsSync();
       closePopup();
       refreshSortButtonLabel();
       renderAll();
@@ -6585,7 +6627,10 @@ function openPrintDialog() {
   const html = `
     <div class="modal-content" style="max-width: 1100px; width: 95vw;">
       <h2 style="margin-bottom: 12px;">Print Schedule</h2>
-      <div style="display:grid; grid-template-columns: 280px 1fr; gap:14px; align-items:start;">
+      <!-- minmax(0, 1fr) prevents the right column from growing to fit
+           oversized iframe contents — without it, zooming the preview made
+           the modal jitter as it tried to accommodate. -->
+      <div style="display:grid; grid-template-columns: 280px minmax(0, 1fr); gap:14px; align-items:start;">
 
         <!-- Left: controls -->
         <div style="max-height: 70vh; overflow-y: auto; padding-right: 4px;">
@@ -6682,7 +6727,7 @@ function openPrintDialog() {
         </div>
 
         <!-- Right: live preview -->
-        <div>
+        <div style="min-width: 0;">
           <div style="display:flex; justify-content:space-between; align-items:center; font-size:11px; color:var(--text-faint); margin-bottom:6px; gap:8px;">
             <span style="white-space:nowrap;">Live preview <span id="previewMeta"></span></span>
             <span style="display:flex; align-items:center; gap:6px; flex:1; justify-content:flex-end;">
@@ -6693,8 +6738,12 @@ function openPrintDialog() {
               <span id="previewZoomLabel" style="color:var(--text-dim); min-width:38px; text-align:right;">100%</span>
             </span>
           </div>
-          <div id="printPreviewFrame" style="background:#444; border-radius:4px; padding:18px; height:62vh; overflow:auto; display:flex; justify-content:center; align-items:flex-start;">
-            <div id="printPreviewSlot" style="position: relative; transition: width 0.15s, height 0.15s;">
+          <!-- Frame is the scroll container — fixed height, hidden overflow
+               horizontally + vertically auto. Slot inside is sized exactly to
+               the preview's pixel dimensions and positioned with margin auto
+               only when it's smaller than the frame. -->
+          <div id="printPreviewFrame" style="background:#444; border-radius:4px; padding:18px; height:62vh; width: 100%; overflow:auto; box-sizing: border-box;">
+            <div id="printPreviewSlot" style="position: relative; margin: 0 auto;">
               <iframe id="printPreviewIframe" style="background:white; box-shadow:0 4px 16px rgba(0,0,0,0.5); border:0; display:block;"></iframe>
             </div>
           </div>
