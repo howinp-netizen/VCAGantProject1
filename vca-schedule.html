@@ -6647,8 +6647,10 @@ function openPrintDialog() {
             <span>Live preview <span id="previewMeta"></span></span>
             <span id="previewPageCount" style="color:var(--text-dim);"></span>
           </div>
-          <div id="printPreviewFrame" style="background:#444; border-radius:4px; padding:12px; height:62vh; overflow:auto; display:flex; justify-content:center; align-items:flex-start;">
-            <iframe id="printPreviewIframe" style="background:white; box-shadow:0 4px 16px rgba(0,0,0,0.5); border:0; transition: width 0.15s, height 0.15s;"></iframe>
+          <div id="printPreviewFrame" style="background:#444; border-radius:4px; padding:18px; height:62vh; overflow:auto; display:flex; justify-content:center; align-items:flex-start;">
+            <div id="printPreviewSlot" style="position: relative; transition: width 0.15s, height 0.15s;">
+              <iframe id="printPreviewIframe" style="background:white; box-shadow:0 4px 16px rgba(0,0,0,0.5); border:0; display:block;"></iframe>
+            </div>
           </div>
         </div>
       </div>
@@ -6681,15 +6683,37 @@ function openPrintDialog() {
       const dims = { letter: [8.5, 11], tabloid: [11, 17] }[opts.paper];
       let w = dims[0], h = dims[1];
       if (opts.orient === 'landscape') [w, h] = [h, w];
-      // Fit to preview pane: max ~700px wide
-      const targetW = 680;
-      const ratio = targetW / (w * 96);
-      const pxW = Math.round(w * 96 * ratio);
-      const pxH = Math.round(h * 96 * ratio);
+
+      // Approach: keep iframe at a CONSTANT DPI (so Letter and Tabloid
+      // visibly differ in size — Tabloid is ~55% wider than Letter at the
+      // same DPI), but render the document at FULL print pixels (96 DPI)
+      // and then visually shrink it via CSS transform: scale(...). This
+      // way the preview is truly to-scale: a 6pt font shows at 6pt × ratio.
+      const PREVIEW_DPI = 56;     // pixels per inch on screen
+      const PRINT_DPI   = 96;     // CSS pixels per inch (browser standard)
+      const previewRatio = PREVIEW_DPI / PRINT_DPI;
+      const docW = Math.round(w * PRINT_DPI);
+      const docH = Math.round(h * PRINT_DPI);
+      const previewW = Math.round(w * PREVIEW_DPI);
+      const previewH = Math.round(h * PREVIEW_DPI);
+
       const iframe = $('#printPreviewIframe');
       if (!iframe) return;
-      iframe.style.width = pxW + 'px';
-      iframe.style.height = pxH + 'px';
+      // Render at full print dimensions, then visually scale down. Use
+      // transform-origin top-left so the scaled box aligns with its slot.
+      iframe.style.width = docW + 'px';
+      iframe.style.height = docH + 'px';
+      iframe.style.transform = `scale(${previewRatio})`;
+      iframe.style.transformOrigin = 'top left';
+
+      // Reserve the visually-scaled space in the preview pane so the
+      // surrounding container sizes correctly.
+      const wrap = $('#printPreviewSlot');
+      if (wrap) {
+        wrap.style.width = previewW + 'px';
+        wrap.style.height = previewH + 'px';
+      }
+
       // Build the actual document and write it into the iframe
       const doc = buildPrintDocumentHtml(opts);
       try {
@@ -6989,7 +7013,7 @@ function buildPrintDocumentHtml(opts) {
 <meta charset="UTF-8">
 <title>VCA Schedule — Print</title>
 <style>
-  @page { size: ${pageW}in ${pageH}in; margin: 0.35in; }
+  @page { size: ${paper} ${orient}; margin: 0.35in; }
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   html, body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #1a1410; background: white; }
   body { padding: 0; }
