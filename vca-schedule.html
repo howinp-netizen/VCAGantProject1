@@ -952,6 +952,20 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
   width: 90%; max-width: 480px; max-height: 85vh; overflow-y: auto;
 }
 .modal-large { max-width: 720px; }
+.modal-content {
+  background: var(--panel); border: 1px solid var(--border-strong); border-radius: 6px;
+  padding: 20px; max-height: 85vh; overflow-y: auto;
+  position: relative;
+}
+.modal-close-x {
+  position: absolute; top: 8px; right: 8px;
+  width: 28px; height: 28px;
+  background: transparent; border: 0; border-radius: 4px;
+  color: var(--text-faint); font-size: 22px; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  padding: 0; z-index: 5;
+}
+.modal-close-x:hover { background: var(--panel-2); color: var(--text); }
 .modal-header { padding: 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
 .modal-title { font-family: "Georgia", serif; font-size: 18px; font-weight: 500; }
 .modal-body { padding: 16px; }
@@ -6504,11 +6518,27 @@ function closeModal() {
 // Mount a modal's HTML into the modal root container. Pairs with closeModal.
 // If the HTML is just the inner content (no .modal-overlay wrapper), we wrap
 // it so the dark backdrop / centered fixed positioning kicks in correctly.
+// Also injects a close × button into every modal-content so users can
+// dismiss without hunting for an explicit Cancel — Esc still works too.
 function showModal(html) {
   const wrapped = html.trim().startsWith('<div class="modal-overlay"')
     ? html
     : `<div class="modal-overlay">${html}</div>`;
   $('#modalRoot').innerHTML = wrapped;
+  // Inject × buttons into any modal-content that doesn't already have one
+  document.querySelectorAll('#modalRoot .modal-content').forEach(content => {
+    if (content.querySelector('.modal-close-x')) return;
+    // Make sure the content is a positioning context so the absolute X anchors correctly
+    if (getComputedStyle(content).position === 'static') content.style.position = 'relative';
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'modal-close-x';
+    x.innerHTML = '×';
+    x.title = 'Close (Esc)';
+    x.setAttribute('aria-label', 'Close');
+    x.addEventListener('click', closeModal);
+    content.appendChild(x);
+  });
 }
 
 // If we have a deferred Firestore snapshot waiting and the user has fully
@@ -6594,6 +6624,16 @@ function openPrintDialog() {
           </div>
 
           <div class="field-group" style="margin-bottom: 12px;">
+            <label class="field-label">Today position</label>
+            <select class="field-input" id="printTodayPos">
+              <option value="auto" selected>Auto (fit all milestones)</option>
+              <option value="left">Today at left (planning)</option>
+              <option value="center">Today at center</option>
+              <option value="right">Today at right (history)</option>
+            </select>
+          </div>
+
+          <div class="field-group" style="margin-bottom: 12px;">
             <label class="field-label">Zoom <span id="printScaleLabel" style="color:var(--text-faint); font-size:10px;">(85%)</span></label>
             <input type="range" id="printScale" min="40" max="160" value="85" step="5" style="width:100%;" />
             <div style="display:flex; justify-content:space-between; font-size:9px; color:var(--text-faint);">
@@ -6603,7 +6643,7 @@ function openPrintDialog() {
 
           <div class="field-group" style="margin-bottom: 12px;">
             <label class="field-label">Timeline Width <span id="printBarLabel" style="color:var(--text-faint); font-size:10px;">(60%)</span></label>
-            <input type="range" id="printBarWidth" min="30" max="80" value="60" step="5" style="width:100%;" />
+            <input type="range" id="printBarWidth" min="20" max="90" value="60" step="5" style="width:100%;" />
             <div style="display:flex; justify-content:space-between; font-size:9px; color:var(--text-faint);">
               <span>More info columns</span><span>Wider Gantt</span>
             </div>
@@ -6614,16 +6654,16 @@ function openPrintDialog() {
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:4px 8px; font-size:11px;">
               <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="num" checked /> Project #</label>
               <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="name" checked disabled /> Name</label>
-              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="client" checked /> Client</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="client" /> Client</label>
               <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="phase" /> Phase</label>
               <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="mgr" checked /> Mgr</label>
               <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="assignees" /> Assignees</label>
               <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="status" /> Status</label>
-              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="due" /> Due</label>
+              <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" data-col="due" checked /> Due</label>
             </div>
           </div>
 
-          <div class="field-group" style="margin-bottom: 14px;">
+          <div class="field-group" style="margin-bottom: 12px;">
             <label class="field-label">Include</label>
             <div style="display:flex; flex-direction:column; gap:4px; font-size:11px;">
               <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" id="incMilestoneRows" checked /> Milestone rows (under each project)</label>
@@ -6643,14 +6683,23 @@ function openPrintDialog() {
 
         <!-- Right: live preview -->
         <div>
-          <div style="display:flex; justify-content:space-between; align-items:center; font-size:11px; color:var(--text-faint); margin-bottom:6px;">
-            <span>Live preview <span id="previewMeta"></span></span>
-            <span id="previewPageCount" style="color:var(--text-dim);"></span>
+          <div style="display:flex; justify-content:space-between; align-items:center; font-size:11px; color:var(--text-faint); margin-bottom:6px; gap:8px;">
+            <span style="white-space:nowrap;">Live preview <span id="previewMeta"></span></span>
+            <span style="display:flex; align-items:center; gap:6px; flex:1; justify-content:flex-end;">
+              <button class="btn small" id="previewZoomOut" title="Zoom preview out" style="padding:1px 8px;">−</button>
+              <input type="range" id="previewZoomSlider" min="20" max="200" value="100" step="5" style="width:120px;" />
+              <button class="btn small" id="previewZoomIn" title="Zoom preview in" style="padding:1px 8px;">+</button>
+              <button class="btn small" id="previewZoomFit" title="Fit page to window">Fit</button>
+              <span id="previewZoomLabel" style="color:var(--text-dim); min-width:38px; text-align:right;">100%</span>
+            </span>
           </div>
           <div id="printPreviewFrame" style="background:#444; border-radius:4px; padding:18px; height:62vh; overflow:auto; display:flex; justify-content:center; align-items:flex-start;">
             <div id="printPreviewSlot" style="position: relative; transition: width 0.15s, height 0.15s;">
               <iframe id="printPreviewIframe" style="background:white; box-shadow:0 4px 16px rgba(0,0,0,0.5); border:0; display:block;"></iframe>
             </div>
+          </div>
+          <div style="font-size:10px; color:var(--text-faint); margin-top:4px;">
+            <span id="previewPageCount"></span>
           </div>
         </div>
       </div>
@@ -6668,12 +6717,19 @@ function openPrintDialog() {
     cols: Array.from(document.querySelectorAll('input[type="checkbox"][data-col]:checked')).map(el => el.dataset.col),
     incMilestoneRows: $('#incMilestoneRows').checked,
     incToday: $('#incToday').checked,
+    todayPos: $('#printTodayPos').value,
   });
 
   // Live preview update — rebuild the print HTML and inject into the
   // preview iframe. The iframe size is the actual page ratio scaled to
   // fit the preview pane.
   let previewUpdateScheduled = false;
+  // Visual preview zoom — user controls the apparent paper size in the
+  // preview pane. Saved as a multiplier so 100% means a sensible default
+  // DPI (56), 200% doubles it (closer to actual size), 20% lets the user
+  // see large Tabloid-portrait layouts in full.
+  let userPreviewZoom = 1.0;
+
   const updatePreview = () => {
     if (previewUpdateScheduled) return;
     previewUpdateScheduled = true;
@@ -6684,38 +6740,27 @@ function openPrintDialog() {
       let w = dims[0], h = dims[1];
       if (opts.orient === 'landscape') [w, h] = [h, w];
 
-      // Approach: keep iframe at a CONSTANT DPI (so Letter and Tabloid
-      // visibly differ in size — Tabloid is ~55% wider than Letter at the
-      // same DPI), but render the document at FULL print pixels (96 DPI)
-      // and then visually shrink it via CSS transform: scale(...). This
-      // way the preview is truly to-scale: a 6pt font shows at 6pt × ratio.
-      const PREVIEW_DPI = 56;     // pixels per inch on screen
-      const PRINT_DPI   = 96;     // CSS pixels per inch (browser standard)
+      const PRINT_DPI   = 96;
+      // Effective preview DPI scales with the user's zoom slider
+      const PREVIEW_DPI = 56 * userPreviewZoom;
       const previewRatio = PREVIEW_DPI / PRINT_DPI;
-      const docW = Math.round(w * PRINT_DPI);
-      const docH = Math.round(h * PRINT_DPI);
       const previewW = Math.round(w * PREVIEW_DPI);
       const previewH = Math.round(h * PREVIEW_DPI);
 
       const iframe = $('#printPreviewIframe');
       if (!iframe) return;
-      // Render at full print dimensions, then visually scale down. Use
-      // transform-origin top-left so the scaled box aligns with its slot.
-      iframe.style.width = docW + 'px';
-      iframe.style.height = docH + 'px';
-      iframe.style.transform = `scale(${previewRatio})`;
-      iframe.style.transformOrigin = 'top left';
+      iframe.style.width = previewW + 'px';
+      iframe.style.height = previewH + 'px';
+      iframe.style.transform = '';
 
-      // Reserve the visually-scaled space in the preview pane so the
-      // surrounding container sizes correctly.
       const wrap = $('#printPreviewSlot');
       if (wrap) {
         wrap.style.width = previewW + 'px';
         wrap.style.height = previewH + 'px';
       }
 
-      // Build the actual document and write it into the iframe
-      const doc = buildPrintDocumentHtml(opts);
+      // Build the actual document and write it into the iframe.
+      const doc = buildPrintDocumentHtml(opts, { previewZoom: previewRatio });
       try {
         const idoc = iframe.contentDocument || iframe.contentWindow.document;
         idoc.open();
@@ -6740,6 +6785,46 @@ function openPrintDialog() {
   document.querySelectorAll('input, select').forEach(el => {
     el.addEventListener('change', updatePreview);
     el.addEventListener('input', updatePreview);
+  });
+
+  // Preview zoom controls. The slider sets userPreviewZoom (a multiplier on
+  // the base preview DPI), then re-renders. +/− buttons step by 10%.
+  // "Fit" computes the zoom that makes the page fit the preview pane.
+  const setPreviewZoom = (pct) => {
+    pct = Math.max(20, Math.min(200, pct));
+    userPreviewZoom = pct / 100;
+    const slider = $('#previewZoomSlider');
+    if (slider) slider.value = pct;
+    const label = $('#previewZoomLabel');
+    if (label) label.textContent = pct + '%';
+    updatePreview();
+  };
+  $('#previewZoomSlider')?.addEventListener('input', (e) => {
+    setPreviewZoom(parseInt(e.target.value, 10));
+  });
+  $('#previewZoomIn')?.addEventListener('click', () => {
+    setPreviewZoom(Math.round(userPreviewZoom * 100) + 10);
+  });
+  $('#previewZoomOut')?.addEventListener('click', () => {
+    setPreviewZoom(Math.round(userPreviewZoom * 100) - 10);
+  });
+  $('#previewZoomFit')?.addEventListener('click', () => {
+    // Compute the zoom that fits the current paper into the preview pane.
+    const opts = readOptions();
+    const dims = { letter: [8.5, 11], tabloid: [11, 17] }[opts.paper];
+    let w = dims[0], h = dims[1];
+    if (opts.orient === 'landscape') [w, h] = [h, w];
+    const frame = $('#printPreviewFrame');
+    if (!frame) return;
+    const availW = frame.clientWidth - 40;   // padding
+    const availH = frame.clientHeight - 40;
+    // Required PREVIEW_DPI to fit
+    const dpiByW = availW / w;
+    const dpiByH = availH / h;
+    const fitDpi = Math.min(dpiByW, dpiByH);
+    // Convert that DPI back to a percentage relative to the 56-DPI base
+    const pct = Math.round((fitDpi / 56) * 100);
+    setPreviewZoom(pct);
   });
 
   $('#printCancel').addEventListener('click', closeModal);
@@ -6816,11 +6901,15 @@ function doPrintViaIframe(opts) {
 // string. Layout: a header, a single table where the timeline column has
 // month markers across the top and a vertical "today" line that spans every
 // row. Page breaks happen naturally between rows.
-function buildPrintDocumentHtml(opts) {
+function buildPrintDocumentHtml(opts, previewOpts) {
   // Backward-compat: if called with positional args, normalize
   if (typeof opts === 'string') {
     opts = { paper: arguments[0], orient: arguments[1], scope: arguments[2] };
   }
+  // previewOpts.previewZoom: when set, the body uses CSS `zoom` so the
+  // preview iframe can render the page smaller while keeping all text and
+  // shapes vector-crisp (unlike transform:scale which rasterizes).
+  const previewZoom = (previewOpts && previewOpts.previewZoom) || null;
   const paper  = opts.paper  || 'letter';
   const orient = opts.orient || 'landscape';
   const scope  = opts.scope  || 'current';
@@ -6838,7 +6927,14 @@ function buildPrintDocumentHtml(opts) {
     ? STATE.data.projects.filter(p => projectPassesFilters(p))
     : STATE.data.projects.slice();
 
-  // Compute timeline range
+  // Compute timeline range. By default we span all milestones with a small
+  // pad on each side (= "auto"). The user can override this via todayPos:
+  //   left:   today at 5% from left  (mostly future)
+  //   center: today in the middle    (balanced)
+  //   right:  today at 95%           (mostly past)
+  // For these modes we keep the same total span as auto but shift the window
+  // so today lands in the requested spot.
+  const todayPos = opts.todayPos || 'auto';
   let minDate = null, maxDate = null;
   for (const p of visibleProjects) {
     for (const m of (p.milestones || [])) {
@@ -6855,6 +6951,15 @@ function buildPrintDocumentHtml(opts) {
   if (!maxDate) maxDate = addDays(today(), 90);
   minDate = addDays(minDate, -7);
   maxDate = addDays(maxDate, 14);
+  if (todayPos !== 'auto') {
+    const span = daysBetween(minDate, maxDate);
+    const tDay = today();
+    const pos = { left: 0.05, center: 0.5, right: 0.95 }[todayPos] || 0.5;
+    // Place today at the requested fractional position
+    const offsetFromMin = Math.round(span * pos);
+    minDate = addDays(tDay, -offsetFromMin);
+    maxDate = addDays(minDate, span);
+  }
   const totalDays = Math.max(1, daysBetween(minDate, maxDate));
 
   const viewLabel = STATE.view === 'gantt' ? 'Gantt Chart'
@@ -6924,7 +7029,7 @@ function buildPrintDocumentHtml(opts) {
     };
     return `<tr class="proj-row">
       ${cols.map(c => cellFor(c)).join('')}
-      <td class="c-bar"><div class="bar-track">${projBarHtml}</div></td>
+      <td class="c-bar"><div class="bar-track">${gridLinesHtml}${projBarHtml}</div></td>
     </tr>`;
   };
 
@@ -6954,22 +7059,21 @@ function buildPrintDocumentHtml(opts) {
     };
     return `<tr class="ms-row">
       ${cols.map(c => cellFor(c)).join('')}
-      <td class="c-bar"><div class="bar-track">${
-        d ? `<div class="ms-mark" style="left:${left}%;"><span class="d">◆</span><span class="t">${escapeHtml(m.dueDate)}${status ? ' · ' + escapeHtml(status.name) : ''}</span></div>` : ''
+      <td class="c-bar"><div class="bar-track">${gridLinesHtml}${
+        d ? `<div class="ms-mark" style="left:${left}%;"><span class="d"></span><span class="t">${escapeHtml(m.dueDate)}${status ? ' · ' + escapeHtml(status.name) : ''}</span></div>` : ''
       }</div></td>
     </tr>`;
   };
 
-  const rowsHtml = visibleProjects.map(p => {
-    const milestones = (p.milestones || []).filter(m => milestonePassesFilters(m));
-    let r = renderProjectRow(p, milestones);
-    if (incMilestoneRows) {
-      r += milestones.map(m => renderMilestoneRow(p, m)).join('');
-    }
-    return r;
-  }).join('');
+  // (rowsHtml is built below, after gridLinesHtml is computed —
+  // renderProjectRow / renderMilestoneRow reference it.)
 
-  // Month markers (rendered into the timeline column header)
+  // Month markers + day-tick grid for the timeline header. Density of day
+  // labels adapts to total span so the labels don't overlap:
+  //   span ≤ 90 days  → label every 7 days (week markers: 1, 8, 15, 22…)
+  //   span ≤ 180 days → every 14 days
+  //   span ≤ 365 days → every month start only (no day labels)
+  //   else            → only month labels
   let cur = new Date(minDate.getFullYear(), minDate.getMonth(), 1);
   const monthMarkers = [];
   while (cur <= maxDate) {
@@ -6980,6 +7084,64 @@ function buildPrintDocumentHtml(opts) {
     }
     cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
   }
+
+  // Day-tick step (in days) — denser when the span is short
+  const dayStep = totalDays <= 90 ? 7 : totalDays <= 180 ? 14 : totalDays <= 365 ? 0 : 0;
+  const dayTicks = [];
+  if (dayStep > 0) {
+    // Anchor on the 1st of each month, then step within
+    let walker = new Date(minDate.getFullYear(), minDate.getMonth(), 1);
+    while (walker <= maxDate) {
+      // Mark every dayStep within this month
+      for (let dom = 1; dom <= 31; dom += dayStep) {
+        const d = new Date(walker.getFullYear(), walker.getMonth(), dom);
+        if (d.getMonth() !== walker.getMonth()) break; // overflowed to next month
+        if (d < minDate || d > maxDate) continue;
+        const left = (daysBetween(minDate, d) / totalDays) * 100;
+        const isMonthStart = dom === 1;
+        dayTicks.push(`<div class="day-tick ${isMonthStart ? 'first' : ''}" style="left:${left}%;">${dom}</div>`);
+      }
+      walker = new Date(walker.getFullYear(), walker.getMonth() + 1, 1);
+    }
+  }
+  // Vertical grid lines at every week (or step) inside the bar tracks
+  const gridLines = [];
+  if (dayStep > 0) {
+    let walker = new Date(minDate.getFullYear(), minDate.getMonth(), 1);
+    while (walker <= maxDate) {
+      for (let dom = 1; dom <= 31; dom += dayStep) {
+        const d = new Date(walker.getFullYear(), walker.getMonth(), dom);
+        if (d.getMonth() !== walker.getMonth()) break;
+        if (d < minDate || d > maxDate) continue;
+        const left = (daysBetween(minDate, d) / totalDays) * 100;
+        const isMonthStart = dom === 1;
+        gridLines.push(`<div class="grid-line ${isMonthStart ? 'major' : ''}" style="left:${left}%;"></div>`);
+      }
+      walker = new Date(walker.getFullYear(), walker.getMonth() + 1, 1);
+    }
+  } else {
+    // Fall back to month grid lines only
+    let walker = new Date(minDate.getFullYear(), minDate.getMonth(), 1);
+    while (walker <= maxDate) {
+      const offset = daysBetween(minDate, walker);
+      if (offset >= 0) {
+        const left = (offset / totalDays) * 100;
+        gridLines.push(`<div class="grid-line major" style="left:${left}%;"></div>`);
+      }
+      walker = new Date(walker.getFullYear(), walker.getMonth() + 1, 1);
+    }
+  }
+  const gridLinesHtml = gridLines.join('');
+
+  // Now that gridLinesHtml is defined, render the actual rows.
+  const rowsHtml = visibleProjects.map(p => {
+    const milestones = (p.milestones || []).filter(m => milestonePassesFilters(m));
+    let r = renderProjectRow(p, milestones);
+    if (incMilestoneRows) {
+      r += milestones.map(m => renderMilestoneRow(p, m)).join('');
+    }
+    return r;
+  }).join('');
 
   // Today's left position WITHIN the entire table (in %).
   const t = today();
@@ -7016,7 +7178,11 @@ function buildPrintDocumentHtml(opts) {
   @page { size: ${paper} ${orient}; margin: 0.35in; }
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   html, body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #1a1410; background: white; }
-  body { padding: 0; }
+  body { padding: 0; ${previewZoom ? `zoom: ${previewZoom};` : ''} }
+  /* When actually printing, undo any preview zoom so output is full-size. */
+  @media print {
+    body { zoom: 1 !important; }
+  }
   .header {
     display: flex; justify-content: space-between; align-items: baseline;
     border-bottom: 1.5px solid #1a1410; padding-bottom: ${(3*scale).toFixed(2)}pt;
@@ -7069,26 +7235,69 @@ function buildPrintDocumentHtml(opts) {
     height: ${(parseFloat(rowHeight)*0.4).toFixed(2)}pt;
     background: #a8554a; transform: translateX(-50%) rotate(45deg);
   }
+  /* Milestone marker on a milestone row: the diamond sits exactly at the
+     due date (left:X%), and the date/status label sits immediately to the
+     right of the diamond. We use two separately-positioned elements so the
+     diamond's center stays anchored to the actual date — the label simply
+     starts at the diamond's right edge and reads outward. */
   .ms-mark {
-    position: absolute; top: ${(parseFloat(rowHeight)*0.1).toFixed(2)}pt;
-    transform: translateX(-50%);
-    display: flex; align-items: center; gap: ${(1.2*scale).toFixed(2)}pt;
-    font-size: ${msFont}pt; color: #444; white-space: nowrap;
+    position: absolute; top: 0; bottom: 0; pointer-events: none;
   }
-  .ms-mark .d { color: #a8554a; font-size: ${baseFont}pt; }
-  .ms-mark .t { background: rgba(255,255,255,0.92); padding: 0 ${(1.2*scale).toFixed(2)}pt; }
+  .ms-mark .d {
+    position: absolute; top: ${(parseFloat(rowHeight)*0.27).toFixed(2)}pt;
+    width: ${(parseFloat(rowHeight)*0.42).toFixed(2)}pt;
+    height: ${(parseFloat(rowHeight)*0.42).toFixed(2)}pt;
+    background: #a8554a; transform: translateX(-50%) rotate(45deg);
+  }
+  .ms-mark .t {
+    position: absolute;
+    left: ${(parseFloat(rowHeight)*0.32).toFixed(2)}pt;  /* sit just right of the diamond */
+    top: ${(parseFloat(rowHeight)*0.18).toFixed(2)}pt;
+    background: rgba(255,255,255,0.92);
+    padding: 0 ${(1.2*scale).toFixed(2)}pt;
+    font-size: ${msFont}pt; color: #444;
+    white-space: nowrap;
+  }
 
-  /* Month bar — sits in the timeline column header */
+  /* Month bar — sits in the timeline column header. Two-row: month names
+     on top, day numbers (every 7 or 14 days depending on span) on bottom. */
   .month-bar {
-    position: relative; height: ${(parseFloat(rowHeight)*0.7).toFixed(2)}pt;
+    position: relative;
+    height: ${(parseFloat(rowHeight)*1.2).toFixed(2)}pt;
     background: #ede3d2; font-size: ${tinyFont}pt;
     margin: -${rowPad}pt -${(parseFloat(rowPad)+1).toFixed(2)}pt;
+  }
+  .month-row {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: ${(parseFloat(rowHeight)*0.55).toFixed(2)}pt;
+    border-bottom: 0.5px solid #c8b89a;
+  }
+  .day-row {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    height: ${(parseFloat(rowHeight)*0.55).toFixed(2)}pt;
+    background: #f5ebd8;
   }
   .month-marker {
     position: absolute; top: 0; bottom: 0; border-left: 1px solid #999;
     padding: ${(1.2*scale).toFixed(2)}pt ${(1.5*scale).toFixed(2)}pt 0 ${(1.5*scale).toFixed(2)}pt;
-    color: #333; white-space: nowrap;
+    color: #222; white-space: nowrap; font-weight: 600;
   }
+  .day-tick {
+    position: absolute; top: 0; bottom: 0; border-left: 0.5px solid #c8b89a;
+    padding: ${(1*scale).toFixed(2)}pt ${(1*scale).toFixed(2)}pt 0 ${(1.2*scale).toFixed(2)}pt;
+    color: #555; white-space: nowrap; font-variant-numeric: tabular-nums;
+    font-size: ${(tinyFont * 0.92).toFixed(2)}pt;
+  }
+  .day-tick.first { border-left: 1px solid #999; color: #222; font-weight: 600; }
+
+  /* Vertical grid lines drawn over each row's bar track. Help align
+     milestones to specific weeks/months when reading the chart. */
+  .grid-line {
+    position: absolute; top: 0; bottom: 0; width: 0;
+    border-left: 0.4px solid #e2d6bc;
+    pointer-events: none;
+  }
+  .grid-line.major { border-left: 0.5px solid #c8b89a; }
 
   .proj-row, .ms-row { page-break-inside: avoid; }
 </style>
@@ -7108,7 +7317,10 @@ function buildPrintDocumentHtml(opts) {
       <thead>
         <tr>
           ${cols.map(c => `<th>${headers[c]}</th>`).join('')}
-          <th class="c-bar"><div class="month-bar">${monthMarkers.join('')}</div></th>
+          <th class="c-bar"><div class="month-bar">
+            <div class="month-row">${monthMarkers.join('')}</div>
+            <div class="day-row">${dayTicks.join('')}</div>
+          </div></th>
         </tr>
       </thead>
       <tbody>${rowsHtml || '<tr><td colspan="' + (cols.length + 1) + '" style="padding:20pt; text-align:center; color:#888;">No projects to print</td></tr>'}</tbody>
@@ -8270,6 +8482,15 @@ async function init() {
   });
   // Keyboard: Cmd/Ctrl + K to focus search; Cmd/Ctrl + N for Quick Add
   document.addEventListener('keydown', (e) => {
+    // Esc: close any open modal (popups have their own Esc handlers).
+    if (e.key === 'Escape') {
+      const root = $('#modalRoot');
+      if (root && root.children.length > 0) {
+        e.preventDefault();
+        closeModal();
+        return;
+      }
+    }
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault();
       $('#searchInput').focus();
