@@ -1757,9 +1757,19 @@ function applyIncomingSnapshot(d) {
     STATE.data.projects = incomingProjects;
   }
   STATE.data.trash = d.trash || STATE.data.trash || [];
+  // After receiving someone else's edits, run a silent auto-complete
+  // sweep — if their milestone update finished a project off, the project
+  // status follows along (per the local user's setting). Saves back to
+  // the cloud only when something actually changed.
+  let autoChanged = 0;
+  if (STATE.autoCompleteProject) {
+    for (const p of STATE.data.projects) {
+      if (maybeAutoCompleteProject(p.id, { silent: true })) autoChanged++;
+    }
+  }
   applyViewStateToData();
   renderAll();
-  if (added) saveData();
+  if (added || autoChanged > 0) saveData();
 }
 
 // Permission: only signed-in engineers can create projects. Drafters and
@@ -2208,25 +2218,43 @@ async function saveData() {
 // project's own status to the first Completed status too. No-op when the
 // setting is off, when the project has no milestones, or when the project
 // is already Completed.
-function maybeAutoCompleteProject(projectId) {
-  if (!STATE.autoCompleteProject) return;
+function maybeAutoCompleteProject(projectId, opts) {
+  if (!STATE.autoCompleteProject) return false;
+  const silent = !!(opts && opts.silent);
   const project = STATE.data.projects.find(p => p.id === projectId);
-  if (!project) return;
+  if (!project) return false;
   const ms = project.milestones || [];
-  if (ms.length === 0) return;
+  if (ms.length === 0) return false;
   const allDone = ms.every(m => {
     const st = getStatus(m.statusId);
     return st && st.isCompleted;
   });
-  if (!allDone) return;
+  if (!allDone) return false;
   const projStatus = getStatus(project.statusId);
-  if (projStatus && projStatus.isCompleted) return;
+  if (projStatus && projStatus.isCompleted) return false;
   const completedStatus = STATE.data.statuses.find(s => s.isCompleted);
-  if (!completedStatus) return;
+  if (!completedStatus) return false;
   const oldName = projStatus ? projStatus.name : '?';
   project.statusId = completedStatus.id;
   logHistory(projectId, `Project status: ${oldName} → ${completedStatus.name} (auto: all milestones complete)`);
-  toast(`Project "${project.name}" marked Complete`, 'success');
+  if (!silent) toast(`Project "${project.name}" marked Complete`, 'success');
+  return true;
+}
+
+// Sweep every project — used when the user just enables the auto-complete
+// setting, to bring already-finished projects in line right away. We pass
+// silent so we don't fire one toast per project; instead we emit a single
+// summary toast at the end.
+function sweepAutoCompleteAll() {
+  if (!STATE.autoCompleteProject) return 0;
+  let changed = 0;
+  for (const p of STATE.data.projects) {
+    if (maybeAutoCompleteProject(p.id, { silent: true })) changed++;
+  }
+  if (changed > 0) {
+    toast(`Auto-completed ${changed} project${changed === 1 ? '' : 's'} with all milestones done`, 'success');
+  }
+  return changed;
 }
 
 /* ============== HISTORY ============== */
@@ -7962,7 +7990,15 @@ function saveSettings() {
   // Auto-complete behavior toggle (per-user preference)
   const autoCompEl = $('#autoCompleteProjectToggle');
   if (autoCompEl) {
+    const wasOn = STATE.autoCompleteProject;
     STATE.autoCompleteProject = !!autoCompEl.checked;
+    // If the user just turned the setting ON, sweep every existing
+    // project right now — projects whose milestones are already all
+    // complete should reflect that immediately rather than waiting for
+    // someone to make a future edit.
+    if (!wasOn && STATE.autoCompleteProject) {
+      sweepAutoCompleteAll();
+    }
   }
 
   STATE.data.currentUserId = $('#currentUserSelect').value || null;
