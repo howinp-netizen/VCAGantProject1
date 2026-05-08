@@ -764,6 +764,59 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
   display: flex; justify-content: space-between; align-items: center;
 }
 
+/* Settings dialog — fixed size, sidebar + content pane.
+   The dialog itself never resizes when the user switches categories; only
+   the right pane swaps content. Right pane scrolls if its content exceeds
+   the fixed height. */
+.settings-modal {
+  width: 96vw; height: 92vh;
+  max-width: none; max-height: none;
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.settings-shell {
+  flex: 1; display: flex; min-height: 0;
+  border-top: 1px solid var(--border);
+}
+.settings-nav {
+  width: 220px; flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: var(--panel-2);
+  padding: 16px 0; display: flex; flex-direction: column; gap: 2px;
+  overflow-y: auto;
+}
+.settings-nav-item {
+  background: transparent; border: 0; color: var(--text-dim);
+  padding: 10px 22px; text-align: left;
+  font-size: 13px; cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.settings-nav-item:hover { background: var(--panel); color: var(--text); }
+.settings-nav-item.active {
+  color: var(--accent); border-left-color: var(--accent);
+  background: var(--panel); font-weight: 600;
+}
+.settings-pane {
+  flex: 1; min-width: 0; padding: 24px 32px;
+  overflow-y: auto;
+}
+.settings-tab[hidden] { display: none; }
+.settings-tab-title {
+  font-size: 16px; font-weight: 600; color: var(--text);
+  margin: 0 0 14px 0; padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.settings-block { margin-bottom: 18px; }
+.settings-block:last-child { margin-bottom: 0; }
+.settings-block-label {
+  font-size: 11px; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.5px;
+  margin-bottom: 6px; font-weight: 600;
+}
+.settings-block-help {
+  font-size: 11px; color: var(--text-dim); margin-bottom: 8px;
+}
+
 .children-list { display: flex; flex-direction: column; gap: 4px; }
 .child-item {
   background: var(--panel-2); border: 1px solid var(--border); padding: 8px 10px;
@@ -1193,6 +1246,10 @@ const STATE = {
   showMilestones: true,
   showTasks: true,
   filters: [],
+  // When true: changing a milestone's status to Complete will automatically
+  // mark the parent project Complete if all its other milestones are Complete
+  // too. Per-user preference. Saved via user prefs sync.
+  autoCompleteProject: false,
   sidePanelWidth: 760,
   searchQuery: '',
   firebase: null,
@@ -1304,6 +1361,7 @@ function loadLocal() {
         }
       }
       if (typeof parsed._workloadThreshold === 'number') STATE.workloadThreshold = parsed._workloadThreshold;
+      if (typeof parsed._autoCompleteProject === 'boolean') STATE.autoCompleteProject = parsed._autoCompleteProject;
       if (parsed._filterBarLayout) STATE.filterBarLayout = { ...STATE.filterBarLayout, ...parsed._filterBarLayout };
       if (parsed._projectSort) STATE.projectSort = parsed._projectSort;
       // Restore UI state — view, filters, calendar toggles. Uses the
@@ -1399,6 +1457,7 @@ function saveLocal() {
       _sidePanelVisibleWidth: STATE.sidePanelVisibleWidth,
       _columnSettings: STATE.columnSettings,
       _workloadThreshold: STATE.workloadThreshold,
+      _autoCompleteProject: !!STATE.autoCompleteProject,
       _filterBarLayout: STATE.filterBarLayout,
       _projectSort: STATE.projectSort,
       // UI state cache — view, filters, calendar toggles
@@ -1446,6 +1505,7 @@ function buildUserPrefsPayload() {
     filterBarLayout: STATE.filterBarLayout || {},
     projectSort: STATE.projectSort || 'manual',
     workloadThreshold: STATE.workloadThreshold ?? 3,
+    autoCompleteProject: !!STATE.autoCompleteProject,
     // UI state — what view I'm in, what filters I've applied, calendar
     // toggle states. Persisting these means closing the tab and coming
     // back keeps me where I was.
@@ -1492,6 +1552,7 @@ function applyUserPrefsPayload(p) {
     if (p.filterBarLayout) STATE.filterBarLayout = { ...STATE.filterBarLayout, ...p.filterBarLayout };
     if (typeof p.projectSort === 'string') STATE.projectSort = p.projectSort;
     if (typeof p.workloadThreshold === 'number') STATE.workloadThreshold = p.workloadThreshold;
+    if (typeof p.autoCompleteProject === 'boolean') STATE.autoCompleteProject = p.autoCompleteProject;
     if (p.uiState && typeof p.uiState === 'object') {
       const u = p.uiState;
       if (typeof u.view === 'string')           STATE.view = u.view;
@@ -2141,6 +2202,33 @@ async function saveData() {
   }
 }
 
+/* ============== AUTO-COMPLETE ============== */
+// If the user enabled "Auto-complete projects" in Settings, and every
+// milestone in the given project is now in a Completed status, change the
+// project's own status to the first Completed status too. No-op when the
+// setting is off, when the project has no milestones, or when the project
+// is already Completed.
+function maybeAutoCompleteProject(projectId) {
+  if (!STATE.autoCompleteProject) return;
+  const project = STATE.data.projects.find(p => p.id === projectId);
+  if (!project) return;
+  const ms = project.milestones || [];
+  if (ms.length === 0) return;
+  const allDone = ms.every(m => {
+    const st = getStatus(m.statusId);
+    return st && st.isCompleted;
+  });
+  if (!allDone) return;
+  const projStatus = getStatus(project.statusId);
+  if (projStatus && projStatus.isCompleted) return;
+  const completedStatus = STATE.data.statuses.find(s => s.isCompleted);
+  if (!completedStatus) return;
+  const oldName = projStatus ? projStatus.name : '?';
+  project.statusId = completedStatus.id;
+  logHistory(projectId, `Project status: ${oldName} → ${completedStatus.name} (auto: all milestones complete)`);
+  toast(`Project "${project.name}" marked Complete`, 'success');
+}
+
 /* ============== HISTORY ============== */
 function logHistory(projectId, action) {
   const project = STATE.data.projects.find(p => p.id === projectId);
@@ -2632,7 +2720,7 @@ function renderFilterBar() {
   const me = STATE.data.currentUserId;
   const isMineActive    = !!STATE.filters.find(f => f.type === 'manager' && f.value === me);
   const isMyWorkActive  = !!STATE.filters.find(f => f.type === 'engineer' && f.value === me);
-  const isActiveActive  = !!STATE.filters.find(f => f.type === 'hide_completed' && f.value === 'projects')
+  const isActiveActive  = !!STATE.filters.find(f => f.type === 'project_status' && f.value === 'active')
                        && !!STATE.filters.find(f => f.type === 'hide_completed' && f.value === 'milestones');
   const qfMine = $('#qfMine'); if (qfMine) {
     qfMine.classList.toggle('active', isMineActive);
@@ -2713,13 +2801,26 @@ function toggleQuickFilter(kind) {
       STATE.filters.push({ type: 'engineer', value: me });
     }
   } else if (kind === 'active_only') {
-    const hasP = STATE.filters.find(f => f.type === 'hide_completed' && f.value === 'projects');
-    const hasM = STATE.filters.find(f => f.type === 'hide_completed' && f.value === 'milestones');
-    if (hasP && hasM) {
-      STATE.filters = STATE.filters.filter(f => !(f.type === 'hide_completed'));
+    // "Active only" = projects whose status is explicitly Active (in
+    // progress / under review etc.) AND milestones that aren't completed.
+    // Previously this used hide_completed which let On Hold projects slip
+    // through — that contradicted the button's name.
+    const hasProjActive = STATE.filters.find(f => f.type === 'project_status' && f.value === 'active');
+    const hasMsHide = STATE.filters.find(f => f.type === 'hide_completed' && f.value === 'milestones');
+    if (hasProjActive && hasMsHide) {
+      // Toggle off
+      STATE.filters = STATE.filters.filter(f =>
+        !(f.type === 'project_status' && f.value === 'active') &&
+        !(f.type === 'hide_completed' && f.value === 'milestones')
+      );
     } else {
-      STATE.filters = STATE.filters.filter(f => f.type !== 'hide_completed');
-      STATE.filters.push({ type: 'hide_completed', value: 'projects' });
+      // Toggle on — clear any prior project_status filters since "Active"
+      // is the meaningful narrowing here, then add both rules.
+      STATE.filters = STATE.filters.filter(f =>
+        !(f.type === 'project_status' && f.value === 'active') &&
+        !(f.type === 'hide_completed' && f.value === 'milestones')
+      );
+      STATE.filters.push({ type: 'project_status', value: 'active' });
       STATE.filters.push({ type: 'hide_completed', value: 'milestones' });
     }
   }
@@ -4643,6 +4744,7 @@ function openStatusPopup(anchor, projectId, milestoneId) {
       const newS = getStatus(newId);
       m.statusId = newId;
       logHistory(projectId, `"${m.name}" status: ${oldS.name} → ${newS.name}`);
+      maybeAutoCompleteProject(projectId);
       saveData();
       closePopup();
       renderAll();
@@ -4763,6 +4865,7 @@ function openProgressPopup(anchor, projectId, milestoneId) {
     } else {
       logHistory(projectId, `"${m.name}" progress: ${cur}% → ${newVal}%`);
     }
+    maybeAutoCompleteProject(projectId);
     saveData();
     closePopup();
     renderAll();
@@ -7505,130 +7608,195 @@ function openSettings() {
 
   $('#modalRoot').innerHTML = `
     <div class="modal-overlay">
-      <div class="modal modal-large">
+      <div class="modal settings-modal">
         <div class="modal-header">
           <div class="modal-title">Settings</div>
           <button class="detail-close" onclick="closeModal()">×</button>
         </div>
-        <div class="modal-body">
-          <div class="section-title" style="margin-top:0;">
-            <span>Who am I?</span>
-          </div>
-          <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">
-            Identifies you for "created by" and default project Manager.
-          </div>
-          <select class="field-input" id="currentUserSelect">${userOpts}</select>
+        <div class="settings-shell">
+          <!-- Left sidebar: category tabs -->
+          <nav class="settings-nav" aria-label="Settings categories">
+            <button class="settings-nav-item active" data-tab="general">General</button>
+            <button class="settings-nav-item" data-tab="team">Team</button>
+            <button class="settings-nav-item" data-tab="appearance">Appearance</button>
+            <button class="settings-nav-item" data-tab="workflow">Workflow</button>
+            <button class="settings-nav-item" data-tab="layout">Layout</button>
+            <button class="settings-nav-item" data-tab="sync">Sync &amp; Data</button>
+          </nav>
 
-          <div class="section-title">
-            <span>Team Members</span>
-            <button class="btn small" onclick="addEngineer()">+ Add Member</button>
-          </div>
-          <div class="engineers-list" id="engsList">${engsHtml || '<div style="color:var(--text-faint);">No team members yet</div>'}</div>
+          <!-- Right pane: category contents. Only one is visible at a time. -->
+          <div class="settings-pane">
 
-          <div class="section-title">
-            <span>My Color Overrides</span>
-            <button class="btn small" onclick="resetAllColorOverrides()" ${Object.keys(STATE.colorOverrides).length === 0 ? 'disabled' : ''}>Reset All</button>
-          </div>
-          <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">
-            Pick the colors <strong style="color:var(--text);">you</strong> want to see for each teammate. These overrides are stored only in this browser — other users keep seeing the team's shared colors. Click Reset to go back to the shared color.
-          </div>
-          <div class="engineers-list" id="colorOverrideList">${colorOverrideHtml}</div>
+            <section class="settings-tab" data-tab="general">
+              <h3 class="settings-tab-title">General</h3>
 
-          <div class="section-title">
-            <span>Calendar Deadline Color</span>
-            <button class="btn small" onclick="resetDeadlineColorAndRefresh()" ${(STATE.deadlineColors.bg === DEFAULT_DEADLINE_BG && STATE.deadlineColors.fg === DEFAULT_DEADLINE_FG) ? 'disabled' : ''}>Reset</button>
-          </div>
-          <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">
-            The background and text colors used for milestone deadlines on the calendar view. Stored only in this browser.
-          </div>
-          <div class="engineer-row">
-            <span class="color-swatch" id="deadlinePreviewSwatch" style="background:${STATE.deadlineColors.bg}; color:${STATE.deadlineColors.fg}; width:auto; height:auto; padding:4px 10px; border-radius:3px; font-weight:700; font-size:10px;">◆ Sample Deadline</span>
-            <span style="flex:1; color:var(--text-faint); font-size:10px;">Background</span>
-            <input type="color" id="deadlineBgInput" value="${STATE.deadlineColors.bg}" style="width:30px; padding:0; height:24px;" />
-            <span style="color:var(--text-faint); font-size:10px;">Text</span>
-            <input type="color" id="deadlineFgInput" value="${STATE.deadlineColors.fg}" style="width:30px; padding:0; height:24px;" />
-          </div>
-          <div style="font-size:10px; color:var(--text-faint); margin-bottom:14px;">
-            Quick presets:
-            <button class="btn small deadline-preset" data-bg="#a8554a" data-fg="#fbeee5" style="margin-left:6px;">Terracotta</button>
-            <button class="btn small deadline-preset" data-bg="#8e6f3a" data-fg="#fbeee5">Mustard</button>
-            <button class="btn small deadline-preset" data-bg="#5a7a8a" data-fg="#fbeee5">Slate Blue</button>
-            <button class="btn small deadline-preset" data-bg="#6e8856" data-fg="#fbeee5">Olive</button>
-            <button class="btn small deadline-preset" data-bg="#7a4a6e" data-fg="#fbeee5">Plum</button>
-            <button class="btn small deadline-preset" data-bg="#3d4a5a" data-fg="#d4a574">Charcoal</button>
-          </div>
-
-          <div class="section-title">
-            <span>Categories</span>
-            <button class="btn small" onclick="addCategory()">+ Add Category</button>
-          </div>
-          <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">Tag milestones (e.g., SD, DD, CD, DSA Backcheck).</div>
-          <div class="engineers-list" id="catsList">${catsHtml}</div>
-
-          <div class="section-title">
-            <span>Statuses</span>
-            <button class="btn small" onclick="addStatus()">+ Add Status</button>
-          </div>
-          <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">"Active" = work in progress; "Done" = completed (used by filters).</div>
-          <div class="engineers-list" id="statusesList">${statusesHtml}</div>
-
-          <div class="section-title">
-            <span>Gantt Columns</span>
-          </div>
-          <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">Show/hide columns and adjust their width. You can also drag the right edge of any column header in the Gantt view to resize it.</div>
-          <div id="columnSettingsList">${renderColumnSettingsList()}</div>
-
-          <div class="section-title">
-            <span>Workload Settings</span>
-          </div>
-          <div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">Number of overlapping tasks per day before that day is flagged red in the Workload view.</div>
-          <div class="col-settings-row">
-            <span class="col-label">Heavy load threshold</span>
-            <input type="number" id="settingsThreshold" min="1" max="20" value="${STATE.workloadThreshold}" />
-            <span style="color: var(--text-faint); font-size: 11px;">tasks/day</span>
-          </div>
-
-          <div class="section-title">Cloud Sync (Firebase)</div>
-          ${(() => {
-            const usingOverride = !!fbCfg;
-            let statusLine, projectLine;
-            if (isCloudConnected) {
-              const cfgInUse = usingOverride ? JSON.parse(fbCfg) : DEFAULT_FIREBASE_CONFIG;
-              statusLine = '<span style="color:var(--accent);">☁ Connected — all changes sync to all VCA users.</span>';
-              projectLine = `Project: <code style="color:var(--text);">${escapeHtml(cfgInUse.projectId || '?')}</code>${usingOverride ? ' <span style="color:var(--text-faint);">(custom override)</span>' : ' <span style="color:var(--text-faint);">(default — built into the app)</span>'}`;
-            } else {
-              statusLine = '<span style="color:var(--danger,#c97a6e);">⚠ Not connected.</span> Cloud sync should auto-start on page load. If it does not, check your network or paste a config below.';
-              projectLine = '';
-            }
-            return `<div style="font-size:11px; color:var(--text-dim); margin-bottom:6px;">${statusLine}</div>
-                    ${projectLine ? `<div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">${projectLine}</div>` : ''}`;
-          })()}
-          <details style="margin-bottom: 8px;">
-            <summary style="font-size:11px; color:var(--text-faint); cursor:pointer; user-select:none;">Advanced — connect to a different Firebase project</summary>
-            <div style="margin-top:8px;">
-              <div style="font-size:10px; color:var(--text-faint); margin-bottom:4px;">
-                Most VCA users should leave this empty. Use only if you want this browser to sync to a different Firebase project (e.g. for testing).
+              <div class="settings-block">
+                <div class="settings-block-label">Who am I?</div>
+                <div class="settings-block-help">
+                  Identifies you for "created by" and default project Manager.
+                </div>
+                <select class="field-input" id="currentUserSelect">${userOpts}</select>
               </div>
-              <textarea id="fbConfigInput" rows="6" style="width:100%; font-family:monospace; font-size:11px;" placeholder='{
+
+              <div class="settings-block">
+                <div class="settings-block-label">Behavior</div>
+                <label style="display:flex; align-items:flex-start; gap:8px; padding:6px 0; font-size:12px;">
+                  <input type="checkbox" id="autoCompleteProjectToggle" ${STATE.autoCompleteProject ? 'checked' : ''} style="margin-top:3px;" />
+                  <span>
+                    <strong>Auto-complete projects</strong>
+                    <div style="font-size:11px; color:var(--text-faint); margin-top:2px;">
+                      When all milestones in a project become Complete, automatically set that project's status to Complete too.
+                    </div>
+                  </span>
+                </label>
+              </div>
+            </section>
+
+            <section class="settings-tab" data-tab="team" hidden>
+              <h3 class="settings-tab-title">Team</h3>
+
+              <div class="settings-block">
+                <div class="settings-block-label" style="display:flex; justify-content:space-between; align-items:center;">
+                  <span>Team Members</span>
+                  <button class="btn small" onclick="addEngineer()">+ Add Member</button>
+                </div>
+                <div class="engineers-list" id="engsList">${engsHtml || '<div style="color:var(--text-faint);">No team members yet</div>'}</div>
+              </div>
+            </section>
+
+            <section class="settings-tab" data-tab="appearance" hidden>
+              <h3 class="settings-tab-title">Appearance</h3>
+
+              <div class="settings-block">
+                <div class="settings-block-label" style="display:flex; justify-content:space-between; align-items:center;">
+                  <span>My Color Overrides</span>
+                  <button class="btn small" onclick="resetAllColorOverrides()" ${Object.keys(STATE.colorOverrides).length === 0 ? 'disabled' : ''}>Reset All</button>
+                </div>
+                <div class="settings-block-help">
+                  Pick the colors <strong style="color:var(--text);">you</strong> want to see for each teammate. These overrides are stored only in this browser — other users keep seeing the team's shared colors.
+                </div>
+                <div class="engineers-list" id="colorOverrideList">${colorOverrideHtml}</div>
+              </div>
+
+              <div class="settings-block">
+                <div class="settings-block-label" style="display:flex; justify-content:space-between; align-items:center;">
+                  <span>Calendar Deadline Color</span>
+                  <button class="btn small" onclick="resetDeadlineColorAndRefresh()" ${(STATE.deadlineColors.bg === DEFAULT_DEADLINE_BG && STATE.deadlineColors.fg === DEFAULT_DEADLINE_FG) ? 'disabled' : ''}>Reset</button>
+                </div>
+                <div class="settings-block-help">
+                  Background and text colors used for milestone deadlines on the calendar view. Stored only in this browser.
+                </div>
+                <div class="engineer-row">
+                  <span class="color-swatch" id="deadlinePreviewSwatch" style="background:${STATE.deadlineColors.bg}; color:${STATE.deadlineColors.fg}; width:auto; height:auto; padding:4px 10px; border-radius:3px; font-weight:700; font-size:10px;">◆ Sample Deadline</span>
+                  <span style="flex:1; color:var(--text-faint); font-size:10px;">Background</span>
+                  <input type="color" id="deadlineBgInput" value="${STATE.deadlineColors.bg}" style="width:30px; padding:0; height:24px;" />
+                  <span style="color:var(--text-faint); font-size:10px;">Text</span>
+                  <input type="color" id="deadlineFgInput" value="${STATE.deadlineColors.fg}" style="width:30px; padding:0; height:24px;" />
+                </div>
+                <div style="font-size:10px; color:var(--text-faint); margin-top:6px;">
+                  Quick presets:
+                  <button class="btn small deadline-preset" data-bg="#a8554a" data-fg="#fbeee5" style="margin-left:6px;">Terracotta</button>
+                  <button class="btn small deadline-preset" data-bg="#8e6f3a" data-fg="#fbeee5">Mustard</button>
+                  <button class="btn small deadline-preset" data-bg="#5a7a8a" data-fg="#fbeee5">Slate Blue</button>
+                  <button class="btn small deadline-preset" data-bg="#6e8856" data-fg="#fbeee5">Olive</button>
+                  <button class="btn small deadline-preset" data-bg="#7a4a6e" data-fg="#fbeee5">Plum</button>
+                  <button class="btn small deadline-preset" data-bg="#3d4a5a" data-fg="#d4a574">Charcoal</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-tab" data-tab="workflow" hidden>
+              <h3 class="settings-tab-title">Workflow</h3>
+
+              <div class="settings-block">
+                <div class="settings-block-label" style="display:flex; justify-content:space-between; align-items:center;">
+                  <span>Categories</span>
+                  <button class="btn small" onclick="addCategory()">+ Add Category</button>
+                </div>
+                <div class="settings-block-help">Tag milestones (e.g., SD, DD, CD, DSA Backcheck).</div>
+                <div class="engineers-list" id="catsList">${catsHtml}</div>
+              </div>
+
+              <div class="settings-block">
+                <div class="settings-block-label" style="display:flex; justify-content:space-between; align-items:center;">
+                  <span>Statuses</span>
+                  <button class="btn small" onclick="addStatus()">+ Add Status</button>
+                </div>
+                <div class="settings-block-help">"Active" = work in progress; "Done" = completed (used by filters).</div>
+                <div class="engineers-list" id="statusesList">${statusesHtml}</div>
+              </div>
+            </section>
+
+            <section class="settings-tab" data-tab="layout" hidden>
+              <h3 class="settings-tab-title">Layout</h3>
+
+              <div class="settings-block">
+                <div class="settings-block-label">Gantt Columns</div>
+                <div class="settings-block-help">Show/hide columns and adjust their width. You can also drag the right edge of any column header in the Gantt view to resize it.</div>
+                <div id="columnSettingsList">${renderColumnSettingsList()}</div>
+              </div>
+
+              <div class="settings-block">
+                <div class="settings-block-label">Workload</div>
+                <div class="settings-block-help">Number of overlapping tasks per day before that day is flagged red in the Workload view.</div>
+                <div class="col-settings-row">
+                  <span class="col-label">Heavy load threshold</span>
+                  <input type="number" id="settingsThreshold" min="1" max="20" value="${STATE.workloadThreshold}" />
+                  <span style="color: var(--text-faint); font-size: 11px;">tasks/day</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-tab" data-tab="sync" hidden>
+              <h3 class="settings-tab-title">Sync &amp; Data</h3>
+
+              <div class="settings-block">
+                <div class="settings-block-label">Cloud Sync (Firebase)</div>
+                ${(() => {
+                  const usingOverride = !!fbCfg;
+                  let statusLine, projectLine;
+                  if (isCloudConnected) {
+                    const cfgInUse = usingOverride ? JSON.parse(fbCfg) : DEFAULT_FIREBASE_CONFIG;
+                    statusLine = '<span style="color:var(--accent);">☁ Connected — all changes sync to all VCA users.</span>';
+                    projectLine = `Project: <code style="color:var(--text);">${escapeHtml(cfgInUse.projectId || '?')}</code>${usingOverride ? ' <span style="color:var(--text-faint);">(custom override)</span>' : ' <span style="color:var(--text-faint);">(default — built into the app)</span>'}`;
+                  } else {
+                    statusLine = '<span style="color:var(--danger,#c97a6e);">⚠ Not connected.</span> Cloud sync should auto-start on page load.';
+                    projectLine = '';
+                  }
+                  return `<div style="font-size:11px; color:var(--text-dim); margin-bottom:6px;">${statusLine}</div>
+                          ${projectLine ? `<div style="font-size:11px; color:var(--text-dim); margin-bottom:8px;">${projectLine}</div>` : ''}`;
+                })()}
+                <details>
+                  <summary style="font-size:11px; color:var(--text-faint); cursor:pointer; user-select:none;">Advanced — connect to a different Firebase project</summary>
+                  <div style="margin-top:8px;">
+                    <div style="font-size:10px; color:var(--text-faint); margin-bottom:4px;">
+                      Most VCA users should leave this empty. Use only if you want this browser to sync to a different Firebase project.
+                    </div>
+                    <textarea id="fbConfigInput" rows="6" style="width:100%; font-family:monospace; font-size:11px;" placeholder='{
   "apiKey": "...",
-  "authDomain": "...",
   "projectId": "...",
   ...
 }'>${fbCfg || ''}</textarea>
-              <div style="margin-top:8px; display:flex; gap:8px;">
-                <button class="btn primary small" onclick="saveFirebaseConfig()">Save Override & Connect</button>
-                ${fbCfg ? '<button class="btn danger small" onclick="disconnectFirebase()">Clear Override (use default)</button>' : ''}
+                    <div style="margin-top:8px; display:flex; gap:8px;">
+                      <button class="btn primary small" onclick="saveFirebaseConfig()">Save Override &amp; Connect</button>
+                      ${fbCfg ? '<button class="btn danger small" onclick="disconnectFirebase()">Clear Override</button>' : ''}
+                    </div>
+                  </div>
+                </details>
               </div>
-            </div>
-          </details>
 
-          <div class="section-title">Data</div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button class="btn small" onclick="exportJson()">↓ Export All (JSON)</button>
-            <button class="btn small" onclick="importJsonClick()">↑ Import JSON</button>
-            <button class="btn small" onclick="closeModal(); openTrashModal();">🗑 Trash${(STATE.data.trash || []).length > 0 ? ` (${STATE.data.trash.length})` : ''}</button>
-            <button class="btn small" onclick="loadDemo()">Load Demo Data</button>
-            <button class="btn danger small" onclick="clearAllData()">Clear All</button>
+              <div class="settings-block">
+                <div class="settings-block-label">Data</div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                  <button class="btn small" onclick="exportJson()">↓ Export All (JSON)</button>
+                  <button class="btn small" onclick="importJsonClick()">↑ Import JSON</button>
+                  <button class="btn small" onclick="closeModal(); openTrashModal();">🗑 Trash${(STATE.data.trash || []).length > 0 ? ` (${STATE.data.trash.length})` : ''}</button>
+                  <button class="btn small" onclick="loadDemo()">Load Demo Data</button>
+                  <button class="btn danger small" onclick="clearAllData()">Clear All</button>
+                </div>
+              </div>
+            </section>
+
           </div>
         </div>
         <div class="modal-footer">
@@ -7637,6 +7805,16 @@ function openSettings() {
       </div>
     </div>
   `;
+  // Wire category tabs — clicking a nav item shows that section, hides others.
+  $$('.settings-nav-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.tab;
+      $$('.settings-nav-item').forEach(b => b.classList.toggle('active', b === btn));
+      $$('.settings-tab').forEach(s => {
+        s.hidden = s.dataset.tab !== tab;
+      });
+    });
+  });
   // Wire personal color override pickers — these update the user's local
   // preference immediately (no Save needed) since overrides are local-only.
   setTimeout(() => {
@@ -7781,8 +7959,16 @@ function saveSettings() {
     STATE.workloadThreshold = Math.max(1, Math.min(20, parseInt(thrEl.value) || 3));
   }
 
+  // Auto-complete behavior toggle (per-user preference)
+  const autoCompEl = $('#autoCompleteProjectToggle');
+  if (autoCompEl) {
+    STATE.autoCompleteProject = !!autoCompEl.checked;
+  }
+
   STATE.data.currentUserId = $('#currentUserSelect').value || null;
   saveData();
+  saveLocal();
+  scheduleUserPrefsSync();
   closeModal();
   renderAll();
   toast('Settings saved', 'success');
@@ -8552,14 +8738,28 @@ async function init() {
       e.preventDefault();
       openQuickAddMilestone();
     }
-    // Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z = redo. Skipped while user is in an
-    // input — there native undo handles the text edit.
+    // Cmd/Ctrl+P opens our print preview modal (replaces the browser's
+    // default print dialog, which would try to print the entire app UI).
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'p' || e.key === 'P')) {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      e.preventDefault();
+      openPrintDialog();
+    }
+    // Cmd/Ctrl+Z = undo, Cmd/Ctrl+Y or Cmd/Ctrl+Shift+Z = redo. Skipped
+    // while user is in an input — there native undo handles the text edit.
     if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
       const t = e.target;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       e.preventDefault();
       if (e.shiftKey) performRedo();
       else performUndo();
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y')) {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      e.preventDefault();
+      performRedo();
     }
     // F2: rename the currently selected row in the Gantt side panel.
     if (e.key === 'F2') {
