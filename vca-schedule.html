@@ -1816,6 +1816,22 @@ function canDeleteMilestone(p, m, showToast) {
   return false;
 }
 
+// Tasks: anyone who can delete the milestone PLUS the task's own
+// assignee PLUS the task's creator can delete a task. Previously we
+// reused canDeleteMilestone here, which meant assignees couldn't delete
+// their own tasks and project managers occasionally hit confusing
+// permission errors because canDeleteMilestone didn't cover all cases.
+function canDeleteTask(p, m, t, showToast) {
+  const me = STATE.data.currentUserId;
+  if (!me) { if (showToast) toast('Please identify yourself first', 'error'); return false; }
+  if (p.createdBy === me || p.managerId === me) return true;
+  if (m.createdBy === me) return true;
+  if (t && t.createdBy === me) return true;
+  if (t && t.assigneeId === me) return true;
+  if (showToast) toast("You don't have permission to delete this task.", 'error');
+  return false;
+}
+
 STATE._writerId = uid('w');
 
 // ============== UNDO / TRASH ==============
@@ -5884,11 +5900,26 @@ function handleDetailAction(action, el) {
   if (action === 'delete-task') {
     const p = getProject(projectId);
     const m = getMilestone(projectId, milestoneId);
-    if (!p || !m) return;
-    if (!canDeleteMilestone(p, m, true)) return;
+    if (!p || !m) {
+      console.warn('[delete-task] project or milestone not found', { projectId, milestoneId });
+      return;
+    }
     const t = (m.tasks || []).find(x => x.id === taskId);
-    if (!t) return;
-    if (!confirm(`Move task to Trash?\n\nIt can be restored for ${TRASH_DAYS} days.`)) return;
+    if (!t) {
+      console.warn('[delete-task] task not found in milestone', { taskId, milestoneId });
+      return;
+    }
+    if (!canDeleteTask(p, m, t, true)) {
+      console.warn('[delete-task] permission denied', { me: STATE.data.currentUserId, projectCreatedBy: p.createdBy, managerId: p.managerId, msCreatedBy: m.createdBy, taskAssigneeId: t.assigneeId });
+      return;
+    }
+    let ok;
+    try { ok = confirm(`Move task to Trash?\n\nIt can be restored for ${TRASH_DAYS} days.`); }
+    catch (e) { console.error('[delete-task] confirm threw', e); ok = true; }
+    if (!ok) {
+      console.log('[delete-task] user cancelled at confirm');
+      return;
+    }
     captureUndo(`delete task`, { type: 'tasksList', projectId, milestoneId });
     moveToTrash('task', t, { projectId, projectName: p.name, milestoneId, milestoneName: m.name });
     m.tasks = m.tasks.filter(x => x.id !== taskId);
