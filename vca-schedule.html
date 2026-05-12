@@ -1103,6 +1103,7 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
     <button class="btn" id="refreshBtn" title="Reload latest version from GitHub Pages (clears cache)">↻ Refresh</button>
     <button class="btn" id="printBtn" title="Print Gantt chart">🖨 Print</button>
     <button class="btn" id="settingsBtn">⚙ Settings</button>
+    <button class="btn" id="pasteProjectBtn" style="display:none;" title="Paste project from clipboard">📋 Paste Project</button>
     <button class="btn primary" id="newProjectBtn">+ New Project</button>
   </div>
 </div>
@@ -1854,7 +1855,159 @@ const UNDO_LIMIT = 30;
 const TRASH_DAYS = 30;
 STATE.undoStack = [];
 STATE.redoStack = [];
+// Copy/paste clipboard. Stores a single copied item plus its type so we
+// know what "paste" should mean in context. Persisted in localStorage so a
+// refresh doesn't lose the clipboard mid-task.
+STATE.clipboard = null;  // { type: 'project'|'milestone'|'task', item: deepClone, withChildren: bool }
 STATE._suspendUndoCapture = false; // prevent capturing during an undo/redo itself
+
+// ============== CLIPBOARD (COPY / PASTE) ==============
+//
+// Single-item clipboard for projects, milestones, and tasks. We deep-clone
+// on copy so later edits to the original don't bleed in, and re-id on
+// paste so each pasted copy is a fully independent entity. When copying a
+// parent (project / milestone) we ask the user whether to include its
+// children — that flag is stored alongside the data so paste honors the
+// original intent.
+const CLIPBOARD_KEY = 'studio-schedule-clipboard';
+
+function saveClipboardToStorage() {
+  try {
+    if (STATE.clipboard) {
+      localStorage.setItem(CLIPBOARD_KEY, JSON.stringify(STATE.clipboard));
+    } else {
+      localStorage.removeItem(CLIPBOARD_KEY);
+    }
+  } catch (e) { console.warn('[clipboard] save failed', e); }
+}
+function loadClipboardFromStorage() {
+  try {
+    const raw = localStorage.getItem(CLIPBOARD_KEY);
+    if (raw) STATE.clipboard = JSON.parse(raw);
+  } catch (e) { console.warn('[clipboard] load failed', e); }
+}
+
+// Assign fresh ids throughout a copied subtree so pasted items don't
+// collide with the originals. Also strip created/history metadata since
+// the paste is, conceptually, a new entity.
+function freshIdsForProject(p) {
+  p.id = uid('p');
+  p.createdAt = new Date().toISOString();
+  p.createdBy = STATE.data.currentUserId || p.createdBy || null;
+  delete p.history;
+  for (const m of (p.milestones || [])) freshIdsForMilestone(m);
+}
+function freshIdsForMilestone(m) {
+  m.id = uid('m');
+  m.createdBy = STATE.data.currentUserId || m.createdBy || null;
+  for (const t of (m.tasks || [])) freshIdsForTask(t);
+}
+function freshIdsForTask(t) {
+  t.id = uid('t');
+}
+
+// Public copy entrypoints. Each takes the source item and, for parents,
+// an optional withChildren flag. The flag is set after asking the user.
+function copyProject(p, withChildren) {
+  const data = deepClone(p);
+  if (!withChildren) data.milestones = [];
+  STATE.clipboard = { type: 'project', item: data, withChildren: !!withChildren };
+  saveClipboardToStorage();
+  toast(`Copied project "${p.name}"${withChildren ? ' with milestones' : ''}`, 'success');
+}
+function copyMilestone(m, withChildren) {
+  const data = deepClone(m);
+  if (!withChildren) data.tasks = [];
+  STATE.clipboard = { type: 'milestone', item: data, withChildren: !!withChildren };
+  saveClipboardToStorage();
+  toast(`Copied milestone "${m.name}"${withChildren ? ' with tasks' : ''}`, 'success');
+}
+function copyTask(t) {
+  STATE.clipboard = { type: 'task', item: deepClone(t), withChildren: false };
+  saveClipboardToStorage();
+  toast(`Copied task "${t.name || '(unnamed)'}"`, 'success');
+}
+
+// Paste entrypoints. Each operates on a target — projects list for
+// project paste, a project for milestone paste, a milestone for task paste.
+// Returns the new id (or null on failure) so callers can select it.
+function pasteProject() {
+  if (!STATE.clipboard || STATE.clipboard.type !== 'project') return null;
+  const p = deepClone(STATE.clipboard.item);
+  freshIdsForProject(p);
+  p.name = p.name + ' (copy)';
+  STATE.data.projects.unshift(p);
+  logHistory(p.id, `Created project from clipboard`);
+  saveData();
+  toast(`Pasted project "${p.name}"`, 'success');
+  return p.id;
+}
+function pasteMilestoneInto(projectId) {
+  if (!STATE.clipboard || STATE.clipboard.type !== 'milestone') return null;
+  const p = getProject(projectId);
+  if (!p) return null;
+  const m = deepClone(STATE.clipboard.item);
+  freshIdsForMilestone(m);
+  m.name = m.name + ' (copy)';
+  if (!p.milestones) p.milestones = [];
+  p.milestones.push(m);
+  logHistory(projectId, `Pasted milestone "${m.name}" into project`);
+  saveData();
+  toast(`Pasted milestone "${m.name}"`, 'success');
+  return m.id;
+}
+function pasteTaskInto(projectId, milestoneId) {
+  if (!STATE.clipboard || STATE.clipboard.type !== 'task') return null;
+  const m = getMilestone(projectId, milestoneId);
+  if (!m) return null;
+  const t = deepClone(STATE.clipboard.item);
+  freshIdsForTask(t);
+  t.name = (t.name || 'Task') + ' (copy)';
+  if (!m.tasks) m.tasks = [];
+  m.tasks.push(t);
+  logHistory(projectId, `Pasted task into "${m.name}"`);
+  saveData();
+  toast(`Pasted task`, 'success');
+  return t.id;
+}
+
+// Copy with a children-or-not prompt. Used by Copy buttons in detail
+// panel and the keyboard shortcut. For tasks (no children possible) we
+// skip the prompt.
+async function copyWithPrompt(kind, item) {
+  if (kind === 'task') {
+    copyTask(item);
+    return;
+  }
+  if (kind === 'project') {
+    const msCount = (item.milestones || []).length;
+    if (msCount === 0) {
+      copyProject(item, false);
+      return;
+    }
+    const tCount = (item.milestones || []).reduce((n, m) => n + (m.tasks || []).length, 0);
+    const detail = tCount > 0 ? ` (and ${tCount} task${tCount === 1 ? '' : 's'})` : '';
+    const ok = await showConfirm(
+      `Include ${msCount} milestone${msCount === 1 ? '' : 's'}${detail} in the copy?\n\n• Yes: copies the project together with its milestones and tasks.\n• No: copies only the project itself — milestones will not be included.`,
+      { title: 'Copy Project', confirmLabel: 'Include children', cancelLabel: 'Project only', danger: false }
+    );
+    copyProject(item, ok);
+    return;
+  }
+  if (kind === 'milestone') {
+    const tCount = (item.tasks || []).length;
+    if (tCount === 0) {
+      copyMilestone(item, false);
+      return;
+    }
+    const ok = await showConfirm(
+      `Include ${tCount} task${tCount === 1 ? '' : 's'} in the copy?\n\n• Yes: copies the milestone with its tasks.\n• No: copies only the milestone — tasks will not be included.`,
+      { title: 'Copy Milestone', confirmLabel: 'Include tasks', cancelLabel: 'Milestone only', danger: false }
+    );
+    copyMilestone(item, ok);
+    return;
+  }
+}
 
 // ============== INCOMING-SYNC GUARD ==============
 //
@@ -3280,6 +3433,7 @@ function renderAll() {
   renderDetailPanel();
   refreshCurrentUserBadge();
   refreshUndoRedoButtons();
+  syncControlsToState();  // also refreshes the Paste Project button visibility
 }
 
 function refreshUndoRedoButtons() {
@@ -3364,6 +3518,16 @@ function syncControlsToState() {
   $$('#workloadToolbar .zoom-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.zoom === STATE.zoomLevel);
   });
+  // Paste Project button — visible only when a project is on the clipboard.
+  const pp = $('#pasteProjectBtn');
+  if (pp) {
+    if (STATE.clipboard && STATE.clipboard.type === 'project') {
+      pp.style.display = '';
+      pp.title = `Paste "${STATE.clipboard.item.name || ''}"`;
+    } else {
+      pp.style.display = 'none';
+    }
+  }
 }
 
 function setView(v) {
@@ -5558,15 +5722,19 @@ function renderProjectDetail(pid) {
       </div>
       <div class="section-title">
         <span>Milestones</span>
-        <button class="btn small" data-action="add-milestone">+ Add Milestone</button>
+        <span style="display:flex; gap:6px;">
+          ${STATE.clipboard && STATE.clipboard.type === 'milestone' ? `<button class="btn small" data-action="paste-milestone" title="Paste &quot;${escapeHtml(STATE.clipboard.item.name || '')}&quot;">📋 Paste Milestone</button>` : ''}
+          <button class="btn small" data-action="add-milestone">+ Add Milestone</button>
+        </span>
       </div>
       <div class="children-list">${milestonesHtml}</div>
       <div class="section-title">
         <span>Revision History ${(p.history || []).length > 0 ? `<span style="color:var(--text-faint); font-weight:400;">(${(p.history || []).length})</span>` : ''}</span>
       </div>
       <div class="history-scroll-container">${historyHtml}</div>
-      <div class="section-title" style="border:none; margin-top:24px;">
-        <button class="btn danger small" data-action="delete-project" style="width:100%;">Delete Project</button>
+      <div class="section-title" style="border:none; margin-top:24px; display:flex; gap:8px;">
+        <button class="btn small" data-action="copy-project" style="flex:1;">Copy Project</button>
+        <button class="btn danger small" data-action="delete-project" style="flex:1;">Delete Project</button>
       </div>
     </div>
     ${detailFooter()}
@@ -5676,13 +5844,17 @@ function renderMilestoneDetail(pid, mid) {
       </div>
       <div class="section-title">
         <span>Tasks</span>
-        <button class="btn small" data-action="add-task">+ Add Task</button>
+        <span style="display:flex; gap:6px;">
+          ${STATE.clipboard && STATE.clipboard.type === 'task' ? `<button class="btn small" data-action="paste-task" title="Paste task">📋 Paste Task</button>` : ''}
+          <button class="btn small" data-action="add-task">+ Add Task</button>
+        </span>
       </div>
       <div style="font-size:11px; color:var(--text-faint); margin-bottom:6px;">When work happens for this milestone. Drag bars on the chart to reschedule.</div>
       <div class="children-list">${tasksHtml}</div>
-      <div class="section-title" style="border:none; margin-top:24px;">
-        <button class="btn small" data-action="back-to-project" style="width:48%;">‹ Back to Project</button>
-        <button class="btn danger small" data-action="delete-milestone" style="width:48%; margin-left:4%;">Delete Milestone</button>
+      <div class="section-title" style="border:none; margin-top:24px; display:flex; gap:6px; flex-wrap:wrap;">
+        <button class="btn small" data-action="back-to-project" style="flex:1; min-width:120px;">‹ Back to Project</button>
+        <button class="btn small" data-action="copy-milestone" style="flex:1; min-width:80px;">Copy</button>
+        <button class="btn danger small" data-action="delete-milestone" style="flex:1; min-width:80px;">Delete</button>
       </div>
     </div>
     ${detailFooter()}
@@ -5731,9 +5903,10 @@ function renderTaskDetail(pid, mid, tid) {
         </select>
         <div style="font-size:10px; color:var(--text-faint); margin-top:4px;">Tasks describe when work will happen. Assigning a person is optional.</div>
       </div>
-      <div class="section-title" style="border:none; margin-top:24px;">
-        <button class="btn small" data-action="back-to-milestone" style="width:48%;">‹ Back</button>
-        <button class="btn danger small" data-action="delete-task" style="width:48%; margin-left:4%;">Delete</button>
+      <div class="section-title" style="border:none; margin-top:24px; display:flex; gap:6px; flex-wrap:wrap;">
+        <button class="btn small" data-action="back-to-milestone" style="flex:1; min-width:80px;">‹ Back</button>
+        <button class="btn small" data-action="copy-task" style="flex:1; min-width:60px;">Copy</button>
+        <button class="btn danger small" data-action="delete-task" style="flex:1; min-width:60px;">Delete</button>
       </div>
     </div>
     ${detailFooter()}
@@ -5822,6 +5995,57 @@ async function handleDetailAction(action, el) {
     renderAll();
     return;
   }
+  // Copy actions — prompt for include-children where applicable, then
+  // stash on the clipboard. Paste happens via the floating Paste banner
+  // or context menu (rendered in the relevant detail panels).
+  if (action === 'copy-project') {
+    const p = getProject(projectId);
+    if (!p) return;
+    await copyWithPrompt('project', p);
+    renderAll();
+    return;
+  }
+  if (action === 'copy-milestone') {
+    const m = getMilestone(projectId, milestoneId);
+    if (!m) return;
+    await copyWithPrompt('milestone', m);
+    renderAll();
+    return;
+  }
+  if (action === 'copy-task') {
+    const m = getMilestone(projectId, milestoneId);
+    if (!m) return;
+    const t = (m.tasks || []).find(x => x.id === taskId);
+    if (!t) return;
+    await copyWithPrompt('task', t);
+    renderAll();
+    return;
+  }
+  if (action === 'paste-project') {
+    const newId = pasteProject();
+    if (newId) {
+      STATE.selectedItem = { type: 'project', projectId: newId };
+      renderAll();
+    }
+    return;
+  }
+  if (action === 'paste-milestone') {
+    const newId = pasteMilestoneInto(projectId);
+    if (newId) {
+      STATE.selectedItem = { type: 'milestone', projectId, milestoneId: newId };
+      renderAll();
+    }
+    return;
+  }
+  if (action === 'paste-task') {
+    const newId = pasteTaskInto(projectId, milestoneId);
+    if (newId) {
+      STATE.selectedItem = { type: 'task', projectId, milestoneId, taskId: newId };
+      renderAll();
+    }
+    return;
+  }
+
   if (action === 'add-milestone') {
     if (!maybeConfirmDiscard()) return;
     discardEdits();
@@ -8692,6 +8916,7 @@ function scrollTodayToLeft() {
 
 async function init() {
   loadLocal();
+  loadClipboardFromStorage();
   await initFirebase();
 
   $$('.tab').forEach(t => t.addEventListener('click', () => setView(t.dataset.view)));
@@ -8727,6 +8952,13 @@ async function init() {
   $('#settingsBtn').addEventListener('click', openSettings);
   $('#printBtn').addEventListener('click', openPrintDialog);
   $('#refreshBtn').addEventListener('click', forceRefreshFromServer);
+  $('#pasteProjectBtn').addEventListener('click', () => {
+    const newId = pasteProject();
+    if (newId) {
+      STATE.selectedItem = { type: 'project', projectId: newId };
+      renderAll();
+    }
+  });
   $('#currentUserBadge').addEventListener('click', promptForUserIdentity);
   $('#undoBtn').addEventListener('click', performUndo);
   $('#redoBtn').addEventListener('click', performRedo);
@@ -8892,6 +9124,58 @@ async function init() {
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       e.preventDefault();
       performRedo();
+    }
+    // Cmd/Ctrl+C: copy currently selected item (project/milestone/task).
+    // For parents with children, asks whether to include them.
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C') && !e.shiftKey) {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const sel = STATE.selectedItem;
+      if (!sel) return;
+      // Don't override browser copy if the user has text selected.
+      const textSel = window.getSelection && window.getSelection().toString();
+      if (textSel && textSel.length > 0) return;
+      e.preventDefault();
+      if (sel.type === 'project') {
+        const p = getProject(sel.projectId);
+        if (p) copyWithPrompt('project', p).then(() => renderAll());
+      } else if (sel.type === 'milestone') {
+        const m = getMilestone(sel.projectId, sel.milestoneId);
+        if (m) copyWithPrompt('milestone', m).then(() => renderAll());
+      } else if (sel.type === 'task') {
+        const m = getMilestone(sel.projectId, sel.milestoneId);
+        const tk = m ? (m.tasks || []).find(x => x.id === sel.taskId) : null;
+        if (tk) copyWithPrompt('task', tk).then(() => renderAll());
+      }
+    }
+    // Cmd/Ctrl+V: paste from clipboard. Where it lands depends on what's
+    // on the clipboard AND what's currently selected:
+    //   project on clipboard       → new project at top of list
+    //   milestone on clipboard +
+    //       a project is selected  → milestone added to that project
+    //   task on clipboard +
+    //       a milestone is selected → task added to that milestone
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (!STATE.clipboard) return;
+      e.preventDefault();
+      const sel = STATE.selectedItem;
+      if (STATE.clipboard.type === 'project') {
+        const newId = pasteProject();
+        if (newId) { STATE.selectedItem = { type: 'project', projectId: newId }; renderAll(); }
+      } else if (STATE.clipboard.type === 'milestone') {
+        const projectId = sel?.projectId;
+        if (!projectId) { toast('Select a project to paste this milestone into', 'info'); return; }
+        const newId = pasteMilestoneInto(projectId);
+        if (newId) { STATE.selectedItem = { type: 'milestone', projectId, milestoneId: newId }; renderAll(); }
+      } else if (STATE.clipboard.type === 'task') {
+        const projectId = sel?.projectId;
+        const milestoneId = sel?.milestoneId;
+        if (!projectId || !milestoneId) { toast('Select a milestone to paste this task into', 'info'); return; }
+        const newId = pasteTaskInto(projectId, milestoneId);
+        if (newId) { STATE.selectedItem = { type: 'task', projectId, milestoneId, taskId: newId }; renderAll(); }
+      }
     }
     // F2: rename the currently selected row in the Gantt side panel.
     if (e.key === 'F2') {
