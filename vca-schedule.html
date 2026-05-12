@@ -892,7 +892,23 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 .mywork-item-date.urgent, .mywork-item-date.overdue { color: var(--danger); font-weight: 600; }
 .mywork-item-date.soon { color: var(--warn); }
 .mywork-item-title { font-size: 13px; }
-.mywork-item-meta { font-size: 10px; color: var(--text-faint); margin-top: 2px; }
+.mywork-item-meta {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 12px; margin-top: 4px;
+}
+.mywork-item-meta .proj-num {
+  font-family: var(--mono, "SF Mono", Consolas, monospace);
+  font-size: 11px; color: var(--accent);
+  background: rgba(212, 165, 116, 0.12);
+  padding: 1px 6px; border-radius: 3px;
+  font-weight: 600; letter-spacing: 0.2px;
+}
+.mywork-item-meta .proj-name {
+  color: var(--text); font-weight: 600;
+}
+.mywork-item-meta .proj-client {
+  color: var(--text-faint); font-size: 11px;
+}
 .mywork-item-status { font-size: 10px; text-transform: uppercase; letter-spacing: 0.3px; }
 .mywork-item-progress {
   width: 60px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden;
@@ -6471,7 +6487,11 @@ function renderMyWork() {
               ${cat ? `<span style="color:${cat.color}; font-size:10px; margin-right:6px;">${escapeHtml(cat.name)}</span>` : ''}
               ◆ ${escapeHtml(m.name)}${roleTag}
             </div>
-            <div class="mywork-item-meta">${p.number ? escapeHtml(p.number) + ' · ' : ''}${escapeHtml(p.name)}${p.client ? ' · ' + escapeHtml(p.client) : ''}</div>
+            <div class="mywork-item-meta">
+              ${p.number ? `<span class="proj-num">${escapeHtml(p.number)}</span>` : ''}
+              <span class="proj-name">${escapeHtml(p.name)}</span>
+              ${p.client ? `<span class="proj-client">· ${escapeHtml(p.client)}</span>` : ''}
+            </div>
           </div>
           <div class="mywork-item-progress" title="Progress: ${progress}%">
             <div class="mywork-item-progress-fill" style="width:${progress}%; background:${cat ? cat.color : 'var(--accent)'};"></div>
