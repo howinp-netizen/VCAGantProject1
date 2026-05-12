@@ -4216,7 +4216,7 @@ function attachGanttEvents() {
   // they live for 30 days and can be restored) rather than being permanently
   // erased, and Cmd/Ctrl+Z immediately undoes the deletion.
   $$('[data-delete]').forEach(el => {
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', async (e) => {
       e.stopPropagation();
       const what = el.dataset.delete;
       const projectId = el.dataset.projectId;
@@ -4230,9 +4230,7 @@ function attachGanttEvents() {
         const detail = milestoneCount > 0
           ? ` Includes ${milestoneCount} milestone${milestoneCount === 1 ? '' : 's'}${taskCount > 0 ? ` and ${taskCount} task${taskCount === 1 ? '' : 's'}` : ''}.`
           : '';
-        if (!confirm(`Move "${p.name}" to Trash?${detail}\n\nIt can be restored from Settings → Trash for ${TRASH_DAYS} days.`)) return;
-        // Capture both the projects list (for the deletion) and trash (for
-        // the addition) so a single Undo reverses the whole move-to-trash.
+        if (!(await showConfirm(`Move "${p.name}" to Trash?${detail}\n\nIt can be restored from Settings → Trash for ${TRASH_DAYS} days.`, { title: 'Delete Project', confirmLabel: 'Move to Trash' }))) return;
         captureUndo(`delete project "${p.name}"`, { type: 'projectsList' });
         moveToTrash('project', p, { projectId: p.id, projectName: p.name });
         const idx = STATE.data.projects.findIndex(x => x.id === projectId);
@@ -4247,7 +4245,7 @@ function attachGanttEvents() {
         if (!p || !m) return;
         const taskCount = (m.tasks || []).length;
         const detail = taskCount > 0 ? ` Includes ${taskCount} task${taskCount === 1 ? '' : 's'}.` : '';
-        if (!confirm(`Move milestone "${m.name}" to Trash?${detail}\n\nIt can be restored for ${TRASH_DAYS} days.`)) return;
+        if (!(await showConfirm(`Move milestone "${m.name}" to Trash?${detail}\n\nIt can be restored for ${TRASH_DAYS} days.`, { title: 'Delete Milestone', confirmLabel: 'Move to Trash' }))) return;
         captureUndo(`delete milestone "${m.name}"`, { type: 'milestonesList', projectId: p.id });
         moveToTrash('milestone', m, { projectId: p.id, projectName: p.name, milestoneId: m.id, milestoneName: m.name });
         const idx = (p.milestones || []).findIndex(x => x.id === milestoneId);
@@ -4264,7 +4262,7 @@ function attachGanttEvents() {
         const t = (m.tasks || []).find(x => x.id === taskId);
         if (!t) return;
         const label = t.name || '(unnamed task)';
-        if (!confirm(`Move task "${label}" to Trash?\n\nIt can be restored for ${TRASH_DAYS} days.`)) return;
+        if (!(await showConfirm(`Move task "${label}" to Trash?\n\nIt can be restored for ${TRASH_DAYS} days.`, { title: 'Delete Task', confirmLabel: 'Move to Trash' }))) return;
         captureUndo(`delete task "${label}"`, { type: 'tasksList', projectId: p?.id, milestoneId: m.id });
         moveToTrash('task', t, { projectId: p?.id, projectName: p?.name, milestoneId: m.id, milestoneName: m.name });
         const idx = (m.tasks || []).findIndex(x => x.id === taskId);
@@ -5783,7 +5781,7 @@ function stageEdit(field, value) {
   }
 }
 
-function handleDetailAction(action, el) {
+async function handleDetailAction(action, el) {
   if (!STATE.selectedItem) return;
   const { type, projectId, milestoneId, taskId } = STATE.selectedItem;
 
@@ -5867,7 +5865,11 @@ function handleDetailAction(action, el) {
     const detail = milestoneCount > 0
       ? ` Includes ${milestoneCount} milestone${milestoneCount === 1 ? '' : 's'}${taskCount > 0 ? ` and ${taskCount} task${taskCount === 1 ? '' : 's'}` : ''}.`
       : '';
-    if (!confirm(`Move "${p.name}" to Trash?${detail}\n\nIt can be restored from Settings → Trash for ${TRASH_DAYS} days.`)) return;
+    const ok = await showConfirm(
+      `Move "${p.name}" to Trash?${detail}\n\nIt can be restored from Settings → Trash for ${TRASH_DAYS} days.`,
+      { title: 'Delete Project', confirmLabel: 'Move to Trash' }
+    );
+    if (!ok) return;
     captureUndo(`delete project "${p.name}"`, { type: 'projectsList' });
     moveToTrash('project', p, { projectId: p.id, projectName: p.name });
     STATE.data.projects = STATE.data.projects.filter(x => x.id !== projectId);
@@ -5885,7 +5887,11 @@ function handleDetailAction(action, el) {
     if (!canDeleteMilestone(p, m, true)) return;
     const taskCount = (m.tasks || []).length;
     const detail = taskCount > 0 ? ` Includes ${taskCount} task${taskCount === 1 ? '' : 's'}.` : '';
-    if (!confirm(`Move milestone "${m.name}" to Trash?${detail}\n\nIt can be restored for ${TRASH_DAYS} days.`)) return;
+    const ok = await showConfirm(
+      `Move milestone "${m.name}" to Trash?${detail}\n\nIt can be restored for ${TRASH_DAYS} days.`,
+      { title: 'Delete Milestone', confirmLabel: 'Move to Trash' }
+    );
+    if (!ok) return;
     captureUndo(`delete milestone "${m.name}"`, { type: 'milestonesList', projectId: p.id });
     moveToTrash('milestone', m, { projectId: p.id, projectName: p.name, milestoneId: m.id, milestoneName: m.name });
     p.milestones = p.milestones.filter(x => x.id !== milestoneId);
@@ -5913,11 +5919,12 @@ function handleDetailAction(action, el) {
       console.warn('[delete-task] permission denied', { me: STATE.data.currentUserId, projectCreatedBy: p.createdBy, managerId: p.managerId, msCreatedBy: m.createdBy, taskAssigneeId: t.assigneeId });
       return;
     }
-    let ok;
-    try { ok = confirm(`Move task to Trash?\n\nIt can be restored for ${TRASH_DAYS} days.`); }
-    catch (e) { console.error('[delete-task] confirm threw', e); ok = true; }
+    const ok = await showConfirm(
+      `Move task to Trash?\n\nIt can be restored for ${TRASH_DAYS} days.`,
+      { title: 'Delete Task', confirmLabel: 'Move to Trash' }
+    );
     if (!ok) {
-      console.log('[delete-task] user cancelled at confirm');
+      console.log('[delete-task] user cancelled');
       return;
     }
     captureUndo(`delete task`, { type: 'tasksList', projectId, milestoneId });
@@ -6717,6 +6724,64 @@ function createProject() {
 function closeModal() {
   $('#modalRoot').innerHTML = '';
   flushPendingSnapshotIfIdle();
+}
+
+// Promise-based confirmation dialog using our own modal instead of native
+// window.confirm(). Teams (and other sandboxed iframes that lack
+// allow-modals) silently returns false from window.confirm, which made
+// every delete action look broken to the user — no dialog appeared, and
+// the delete just quietly didn't happen. This replaces that.
+//
+// Returns a Promise resolving to true (confirmed) or false (cancelled).
+// Usage:
+//   if (!(await showConfirm('Are you sure?'))) return;
+//
+// The dialog has a danger-styled confirm button by default. Pass
+// opts.confirmLabel / opts.cancelLabel / opts.danger=false to customize.
+function showConfirm(message, opts) {
+  opts = opts || {};
+  const confirmLabel = opts.confirmLabel || 'Confirm';
+  const cancelLabel  = opts.cancelLabel  || 'Cancel';
+  const danger       = opts.danger !== false;
+  const title        = opts.title || 'Confirm';
+  return new Promise((resolve) => {
+    const html = `
+      <div class="modal-content" style="max-width: 460px;">
+        <h2 style="margin-bottom: 12px;">${escapeHtml(title)}</h2>
+        <div style="font-size: 13px; color: var(--text-dim); line-height: 1.5; margin-bottom: 18px; white-space: pre-line;">${escapeHtml(message)}</div>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+          <button class="btn" id="confirmCancel">${escapeHtml(cancelLabel)}</button>
+          <button class="btn ${danger ? 'danger' : 'primary'}" id="confirmOk">${escapeHtml(confirmLabel)}</button>
+        </div>
+      </div>
+    `;
+    showModal(html);
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      // If our modal is still up, close it. Other close paths (Esc, ×)
+      // will have already cleared modalRoot and we just resolve.
+      const root = $('#modalRoot');
+      if (root && root.querySelector('#confirmOk')) closeModal();
+      resolve(value);
+    };
+    $('#confirmCancel')?.addEventListener('click', () => finish(false));
+    $('#confirmOk')?.addEventListener('click', () => finish(true));
+    // Watch the modal root: if any external code closes it (Esc, × button,
+    // navigation, etc), treat as cancel.
+    const root = $('#modalRoot');
+    if (root) {
+      const obs = new MutationObserver(() => {
+        if (!root.querySelector('#confirmOk')) {
+          obs.disconnect();
+          finish(false);
+        }
+      });
+      obs.observe(root, { childList: true, subtree: true });
+    }
+    setTimeout(() => $('#confirmCancel')?.focus(), 30);
+  });
 }
 
 // Mount a modal's HTML into the modal root container. Pairs with closeModal.
