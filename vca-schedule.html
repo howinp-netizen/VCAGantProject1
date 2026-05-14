@@ -509,29 +509,30 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 }
 .row.milestone-row { font-size: 12px; }
 
-/* Drag handle — iOS-style hamburger. Sits on the very left of every row,
-   faint by default and clearly clickable on row hover. The handle is the
-   ONLY element that should initiate drag — clicking anywhere else on the
-   row keeps its normal behavior (rename, expand, select). */
+/* Drag handle — three-bar hamburger (SVG). Sits at the very left of
+   draggable rows, faint by default, brightens on hover. Only milestone
+   and task rows have one — projects are non-reorderable. */
 .drag-handle {
   flex-shrink: 0;
-  width: 16px; height: 32px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 10px; line-height: 1; letter-spacing: -2px;
+  width: 18px; height: 32px;
+  display: inline-flex; align-items: center; justify-content: center;
   color: var(--text-faint); opacity: 0;
   cursor: grab; user-select: none;
   transition: opacity 0.1s, color 0.1s;
-  font-family: var(--mono, "SF Mono", Consolas, monospace);
-  transform: rotate(90deg);  /* turn the vertical dots into the horizontal hamburger lines */
+}
+.drag-handle svg line {
+  stroke: currentColor; stroke-width: 1.4; stroke-linecap: round;
 }
 .row:hover .drag-handle { opacity: 0.55; }
 .drag-handle:hover { opacity: 1 !important; color: var(--accent); }
 .drag-handle:active { cursor: grabbing; }
+/* Project rows have no handle but still need space-symmetry so columns
+   line up with milestone/task rows. */
+.row.project-row .row-side { padding-left: 18px; }
 /* While a row is being dragged, dim the original. */
 .row.dragging { opacity: 0.35; }
 .row.dragging .drag-handle { cursor: grabbing; }
-/* Drop indicator — a thick accent-colored line above OR below the row,
-   depending on where the cursor is. JS toggles these classes. */
+/* Drop indicator — accent-colored line above OR below the row. */
 .row.drop-target-above { box-shadow: inset 0 2px 0 0 var(--accent); }
 .row.drop-target-below { box-shadow: inset 0 -2px 0 0 var(--accent); }
 
@@ -4175,8 +4176,7 @@ function renderGanttSideRow(row) {
       : `<span class="assign-text">${assignDots}${allAssignIds.length > 5 ? `<span style="font-size:9px; color:var(--text-faint); margin-left:2px;">+${allAssignIds.length - 5}</span>` : ''}</span>`;
 
     return `
-      <div class="row project-row" draggable="true" data-drag-type="project" data-project-id="${p.id}">
-        <span class="drag-handle" title="Drag to reorder">⋮⋮</span>
+      <div class="row project-row">
         <div class="row-side ${sel}" data-type="project" data-project-id="${p.id}">
           ${wrap('name', `<span class="expand-icon" data-toggle="project" data-project-id="${p.id}">${expandIcon}</span><span class="name-text" data-rename="project" data-project-id="${p.id}">${numLabel}${escapeHtml(p.name)}<span class="rename-edit-icon">✏️</span></span><button class="row-add-btn" data-add="milestone" data-project-id="${p.id}" title="Add milestone">+</button>`)}
           ${wrap('client', `<span class="client-text" title="${escapeHtml(p.client || '')}">${p.client ? escapeHtml(p.client) : '<span class=\"editable-empty\">—</span>'}</span>`)}
@@ -4220,7 +4220,7 @@ function renderGanttSideRow(row) {
 
     return `
       <div class="row milestone-row" draggable="true" data-drag-type="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">
-        <span class="drag-handle" title="Drag to reorder">⋮⋮</span>
+        <span class="drag-handle" title="Drag to reorder"><svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><line x1="2" y1="3" x2="10" y2="3"/><line x1="2" y1="6" x2="10" y2="6"/><line x1="2" y1="9" x2="10" y2="9"/></svg></span>
         <div class="row-side indent-1 ${sel}" data-type="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">
           ${wrap('name', `<span class="expand-icon ${expandClass}" data-toggle="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">${expandIcon || '·'}</span><span class="name-text" data-rename="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">◆ ${escapeHtml(m.name)}<span class="rename-edit-icon">✏️</span></span>${visBadge}${progressIcon}<button class="row-add-btn" data-add="task" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Add task to this milestone">+</button>`)}
           ${wrap('client', '')}
@@ -4245,7 +4245,7 @@ function renderGanttSideRow(row) {
 
     return `
       <div class="row" draggable="true" data-drag-type="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}">
-        <span class="drag-handle" title="Drag to reorder">⋮⋮</span>
+        <span class="drag-handle" title="Drag to reorder"><svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><line x1="2" y1="3" x2="10" y2="3"/><line x1="2" y1="6" x2="10" y2="6"/><line x1="2" y1="9" x2="10" y2="9"/></svg></span>
         <div class="row-side indent-2 ${sel}" data-type="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}">
           ${wrap('name', `<span class="expand-icon placeholder">·</span><span class="name-text" data-rename="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" style="color: var(--text-dim); font-size: 11px;">${escapeHtml(t.name || '(unnamed task)')}<span class="rename-edit-icon">✏️</span></span>`)}
           ${wrap('client', '')}
@@ -4706,47 +4706,12 @@ function wireRowDragAndDrop() {
 
 // Move `source` so that it lands immediately above (`above=true`) or
 // below the `target` row. Both must be the same type. Mutates the
-// schedule data, saves, and re-renders.
+// schedule data, saves, and re-renders. Only supports milestone and
+// task reorder — projects are not draggable.
 function performReorder(source, target, above) {
   // No-op when dropping onto itself
-  if (source.type === 'project' && source.projectId === target.projectId) {
-    // Could still be a real move if above/below position differs, but
-    // logically moving "self" to above-self or below-self does nothing
-    // useful. Skip.
-    return;
-  }
   if (source.type === 'milestone' && source.milestoneId === target.milestoneId) return;
   if (source.type === 'task' && source.taskId === target.taskId) return;
-
-  if (source.type === 'project') {
-    captureUndo('reorder project', { type: 'projectsList' });
-    // Manual drag presumes a manual order. If a sort is active (e.g.
-    // "by Project Number"), the next render would re-sort and undo the
-    // drag. Switch to manual so the new order sticks.
-    let switchedToManual = false;
-    if (STATE.projectSort && STATE.projectSort !== 'manual') {
-      STATE.projectSort = 'manual';
-      switchedToManual = true;
-      saveLocal();
-      scheduleUserPrefsSync();
-      refreshSortButtonLabel();
-    }
-    const list = STATE.data.projects;
-    const srcIdx = list.findIndex(p => p.id === source.projectId);
-    if (srcIdx < 0) return;
-    const item = list.splice(srcIdx, 1)[0];
-    let tgtIdx = list.findIndex(p => p.id === target.projectId);
-    if (tgtIdx < 0) {
-      list.splice(srcIdx, 0, item);  // restore
-      return;
-    }
-    if (!above) tgtIdx++;
-    list.splice(tgtIdx, 0, item);
-    saveData();
-    renderAll();
-    toast(switchedToManual ? 'Switched sort to Manual to preserve your order' : 'Project order updated', 'success');
-    return;
-  }
 
   if (source.type === 'milestone') {
     const srcProject = getProject(source.projectId);
