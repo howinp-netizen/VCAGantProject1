@@ -509,6 +509,32 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 }
 .row.milestone-row { font-size: 12px; }
 
+/* Drag handle — iOS-style hamburger. Sits on the very left of every row,
+   faint by default and clearly clickable on row hover. The handle is the
+   ONLY element that should initiate drag — clicking anywhere else on the
+   row keeps its normal behavior (rename, expand, select). */
+.drag-handle {
+  flex-shrink: 0;
+  width: 16px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; line-height: 1; letter-spacing: -2px;
+  color: var(--text-faint); opacity: 0;
+  cursor: grab; user-select: none;
+  transition: opacity 0.1s, color 0.1s;
+  font-family: var(--mono, "SF Mono", Consolas, monospace);
+  transform: rotate(90deg);  /* turn the vertical dots into the horizontal hamburger lines */
+}
+.row:hover .drag-handle { opacity: 0.55; }
+.drag-handle:hover { opacity: 1 !important; color: var(--accent); }
+.drag-handle:active { cursor: grabbing; }
+/* While a row is being dragged, dim the original. */
+.row.dragging { opacity: 0.35; }
+.row.dragging .drag-handle { cursor: grabbing; }
+/* Drop indicator — a thick accent-colored line above OR below the row,
+   depending on where the cursor is. JS toggles these classes. */
+.row.drop-target-above { box-shadow: inset 0 2px 0 0 var(--accent); }
+.row.drop-target-below { box-shadow: inset 0 -2px 0 0 var(--accent); }
+
 .row-side {
   height: 32px; display: flex; align-items: center; padding: 0;
   border-bottom: 1px solid var(--grid); background: inherit; cursor: pointer;
@@ -4149,7 +4175,8 @@ function renderGanttSideRow(row) {
       : `<span class="assign-text">${assignDots}${allAssignIds.length > 5 ? `<span style="font-size:9px; color:var(--text-faint); margin-left:2px;">+${allAssignIds.length - 5}</span>` : ''}</span>`;
 
     return `
-      <div class="row project-row">
+      <div class="row project-row" draggable="true" data-drag-type="project" data-project-id="${p.id}">
+        <span class="drag-handle" title="Drag to reorder">⋮⋮</span>
         <div class="row-side ${sel}" data-type="project" data-project-id="${p.id}">
           ${wrap('name', `<span class="expand-icon" data-toggle="project" data-project-id="${p.id}">${expandIcon}</span><span class="name-text" data-rename="project" data-project-id="${p.id}">${numLabel}${escapeHtml(p.name)}<span class="rename-edit-icon">✏️</span></span><button class="row-add-btn" data-add="milestone" data-project-id="${p.id}" title="Add milestone">+</button>`)}
           ${wrap('client', `<span class="client-text" title="${escapeHtml(p.client || '')}">${p.client ? escapeHtml(p.client) : '<span class=\"editable-empty\">—</span>'}</span>`)}
@@ -4192,7 +4219,8 @@ function renderGanttSideRow(row) {
       `<span class="vis-badge vis-${vis}" title="${vis === 'engineers' ? 'Visible to engineers/managers only' : 'Private — only the owner sees this'}">${vis === 'engineers' ? '👥' : '🔒'}</span>`;
 
     return `
-      <div class="row milestone-row">
+      <div class="row milestone-row" draggable="true" data-drag-type="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">
+        <span class="drag-handle" title="Drag to reorder">⋮⋮</span>
         <div class="row-side indent-1 ${sel}" data-type="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">
           ${wrap('name', `<span class="expand-icon ${expandClass}" data-toggle="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">${expandIcon || '·'}</span><span class="name-text" data-rename="milestone" data-project-id="${row.project.id}" data-milestone-id="${m.id}">◆ ${escapeHtml(m.name)}<span class="rename-edit-icon">✏️</span></span>${visBadge}${progressIcon}<button class="row-add-btn" data-add="task" data-project-id="${row.project.id}" data-milestone-id="${m.id}" title="Add task to this milestone">+</button>`)}
           ${wrap('client', '')}
@@ -4216,7 +4244,8 @@ function renderGanttSideRow(row) {
     const tStatus = getStatus(t.statusId) || getStatus('st_notstarted');
 
     return `
-      <div class="row">
+      <div class="row" draggable="true" data-drag-type="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}">
+        <span class="drag-handle" title="Drag to reorder">⋮⋮</span>
         <div class="row-side indent-2 ${sel}" data-type="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}">
           ${wrap('name', `<span class="expand-icon placeholder">·</span><span class="name-text" data-rename="task" data-project-id="${row.project.id}" data-milestone-id="${row.milestone.id}" data-task-id="${t.id}" style="color: var(--text-dim); font-size: 11px;">${escapeHtml(t.name || '(unnamed task)')}<span class="rename-edit-icon">✏️</span></span>`)}
           ${wrap('client', '')}
@@ -4583,6 +4612,196 @@ function attachGanttEvents() {
       el.addEventListener('mousemove', (e) => moveTooltip(e));
     }
   });
+
+  // -------- Drag & drop reordering --------
+  // Each row can be picked up by its left-side hamburger handle and
+  // dropped above or below another row of the same kind. Projects can
+  // be reordered among the project list; milestones can reorder within
+  // their parent project; tasks within their parent milestone. Crossing
+  // parents (e.g. moving a milestone to a different project) is allowed
+  // intentionally — we update the parent reference on drop.
+  wireRowDragAndDrop();
+}
+
+// Holds the in-flight drag info between dragstart/dragover/drop handlers.
+// Cleared by dragend regardless of success/cancel.
+let _dragInfo = null;
+
+function wireRowDragAndDrop() {
+  $$('.row[draggable="true"]').forEach(row => {
+    // Only start drag when the user grabbed the handle — clicking other
+    // parts of the row (rename, expand) shouldn't initiate a drag.
+    let armed = false;
+    const handle = row.querySelector('.drag-handle');
+    if (handle) {
+      handle.addEventListener('mousedown', () => { armed = true; });
+      handle.addEventListener('mouseup',   () => { armed = false; });
+      // Touch — the handle is the only valid grip on mobile too
+      handle.addEventListener('touchstart', () => { armed = true; }, { passive: true });
+      handle.addEventListener('touchend',   () => { armed = false; });
+    }
+    row.addEventListener('dragstart', (e) => {
+      if (!armed) {
+        e.preventDefault();
+        return;
+      }
+      _dragInfo = {
+        type: row.dataset.dragType,
+        projectId: row.dataset.projectId,
+        milestoneId: row.dataset.milestoneId || null,
+        taskId: row.dataset.taskId || null,
+      };
+      row.classList.add('dragging');
+      // Most browsers require setData for drag to work
+      try { e.dataTransfer.setData('text/plain', JSON.stringify(_dragInfo)); } catch {}
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    row.addEventListener('dragend', () => {
+      armed = false;
+      row.classList.remove('dragging');
+      $$('.row.drop-target-above, .row.drop-target-below').forEach(r => {
+        r.classList.remove('drop-target-above', 'drop-target-below');
+      });
+      _dragInfo = null;
+    });
+    row.addEventListener('dragover', (e) => {
+      if (!_dragInfo) return;
+      // Only allow dropping onto rows of the same TYPE.
+      if (row.dataset.dragType !== _dragInfo.type) return;
+      // Tasks can only land within their own milestone; milestones can
+      // move across projects (we'll re-parent on drop); projects move
+      // freely within the projects list.
+      if (_dragInfo.type === 'task') {
+        if (row.dataset.milestoneId !== _dragInfo.milestoneId) return;
+      }
+      e.preventDefault();  // signals "drop allowed here"
+      e.dataTransfer.dropEffect = 'move';
+      // Decide above-vs-below based on cursor position within the row
+      const rect = row.getBoundingClientRect();
+      const above = (e.clientY - rect.top) < rect.height / 2;
+      row.classList.toggle('drop-target-above', above);
+      row.classList.toggle('drop-target-below', !above);
+    });
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('drop-target-above', 'drop-target-below');
+    });
+    row.addEventListener('drop', (e) => {
+      if (!_dragInfo) return;
+      if (row.dataset.dragType !== _dragInfo.type) return;
+      if (_dragInfo.type === 'task' && row.dataset.milestoneId !== _dragInfo.milestoneId) return;
+      e.preventDefault();
+      const rect = row.getBoundingClientRect();
+      const above = (e.clientY - rect.top) < rect.height / 2;
+      const target = {
+        type: row.dataset.dragType,
+        projectId: row.dataset.projectId,
+        milestoneId: row.dataset.milestoneId || null,
+        taskId: row.dataset.taskId || null,
+      };
+      performReorder(_dragInfo, target, above);
+      row.classList.remove('drop-target-above', 'drop-target-below');
+    });
+  });
+}
+
+// Move `source` so that it lands immediately above (`above=true`) or
+// below the `target` row. Both must be the same type. Mutates the
+// schedule data, saves, and re-renders.
+function performReorder(source, target, above) {
+  // No-op when dropping onto itself
+  if (source.type === 'project' && source.projectId === target.projectId) {
+    // Could still be a real move if above/below position differs, but
+    // logically moving "self" to above-self or below-self does nothing
+    // useful. Skip.
+    return;
+  }
+  if (source.type === 'milestone' && source.milestoneId === target.milestoneId) return;
+  if (source.type === 'task' && source.taskId === target.taskId) return;
+
+  if (source.type === 'project') {
+    captureUndo('reorder project', { type: 'projectsList' });
+    // Manual drag presumes a manual order. If a sort is active (e.g.
+    // "by Project Number"), the next render would re-sort and undo the
+    // drag. Switch to manual so the new order sticks.
+    let switchedToManual = false;
+    if (STATE.projectSort && STATE.projectSort !== 'manual') {
+      STATE.projectSort = 'manual';
+      switchedToManual = true;
+      saveLocal();
+      scheduleUserPrefsSync();
+      refreshSortButtonLabel();
+    }
+    const list = STATE.data.projects;
+    const srcIdx = list.findIndex(p => p.id === source.projectId);
+    if (srcIdx < 0) return;
+    const item = list.splice(srcIdx, 1)[0];
+    let tgtIdx = list.findIndex(p => p.id === target.projectId);
+    if (tgtIdx < 0) {
+      list.splice(srcIdx, 0, item);  // restore
+      return;
+    }
+    if (!above) tgtIdx++;
+    list.splice(tgtIdx, 0, item);
+    saveData();
+    renderAll();
+    toast(switchedToManual ? 'Switched sort to Manual to preserve your order' : 'Project order updated', 'success');
+    return;
+  }
+
+  if (source.type === 'milestone') {
+    const srcProject = getProject(source.projectId);
+    const tgtProject = getProject(target.projectId);
+    if (!srcProject || !tgtProject) return;
+    captureUndo('reorder milestone', { type: 'milestonesList', projectId: target.projectId });
+    if (srcProject.id !== tgtProject.id) {
+      captureUndo('reorder milestone', { type: 'milestonesList', projectId: source.projectId });
+    }
+    const srcList = srcProject.milestones || [];
+    const srcIdx = srcList.findIndex(m => m.id === source.milestoneId);
+    if (srcIdx < 0) return;
+    const item = srcList.splice(srcIdx, 1)[0];
+    if (!tgtProject.milestones) tgtProject.milestones = [];
+    let tgtIdx = tgtProject.milestones.findIndex(m => m.id === target.milestoneId);
+    if (tgtIdx < 0) {
+      srcList.splice(srcIdx, 0, item);
+      return;
+    }
+    if (!above) tgtIdx++;
+    tgtProject.milestones.splice(tgtIdx, 0, item);
+    if (srcProject.id !== tgtProject.id) {
+      logHistory(srcProject.id, `Moved milestone "${item.name}" → "${tgtProject.name}"`);
+      logHistory(tgtProject.id, `Received milestone "${item.name}" from "${srcProject.name}"`);
+    } else {
+      logHistory(srcProject.id, `Reordered milestone "${item.name}"`);
+    }
+    saveData();
+    renderAll();
+    toast('Milestone order updated', 'success');
+    return;
+  }
+
+  if (source.type === 'task') {
+    // Tasks stay within their parent milestone (enforced earlier).
+    const m = getMilestone(source.projectId, source.milestoneId);
+    if (!m) return;
+    captureUndo('reorder task', { type: 'tasksList', projectId: source.projectId, milestoneId: source.milestoneId });
+    const list = m.tasks || [];
+    const srcIdx = list.findIndex(t => t.id === source.taskId);
+    if (srcIdx < 0) return;
+    const item = list.splice(srcIdx, 1)[0];
+    let tgtIdx = list.findIndex(t => t.id === target.taskId);
+    if (tgtIdx < 0) {
+      list.splice(srcIdx, 0, item);
+      return;
+    }
+    if (!above) tgtIdx++;
+    list.splice(tgtIdx, 0, item);
+    logHistory(source.projectId, `Reordered task in "${m.name}"`);
+    saveData();
+    renderAll();
+    toast('Task order updated', 'success');
+    return;
+  }
 }
 
 /* ============== DEADLINE JUMPER ============== */
@@ -8154,6 +8373,24 @@ function openSettings() {
               </div>
 
               <div class="settings-block">
+                <div class="settings-block-label">Conference Calendar Feed</div>
+                <div class="settings-block-help">
+                  Shared milestone deadlines (excluding <strong style="color:var(--text);">CA</strong> categories) are exposed as a live ICS feed. Subscribe to the URL once in Outlook to keep <code style="color:var(--text);">vcaoc.conf@vcaeng.com</code>'s calendar in sync automatically.
+                </div>
+                <div style="display:flex; gap:6px; margin-bottom:8px;">
+                  <input type="text" id="confFeedUrl" readonly value="https://us-central1-vca-schedule.cloudfunctions.net/sharedDeadlines" style="flex:1; font-family:monospace; font-size:11px;" />
+                  <button class="btn small" onclick="copyConfFeedUrl()">Copy URL</button>
+                </div>
+                <div style="font-size:10px; color:var(--text-faint); margin-bottom:8px;">
+                  Outlook web → Calendar → Add calendar → Subscribe from web → paste the URL above. See <code>functions/README.md</code> for full subscribe steps.
+                </div>
+                <div style="display:flex; gap:8px;">
+                  <button class="btn small" onclick="downloadFilteredIcs()">↓ Download .ics (preview)</button>
+                  <button class="btn small" onclick="window.open($('#confFeedUrl').value, '_blank')">Open feed URL</button>
+                </div>
+              </div>
+
+              <div class="settings-block">
                 <div class="settings-block-label">Data</div>
                 <div style="display:flex; gap:8px; flex-wrap:wrap;">
                   <button class="btn small" onclick="exportJson()">↓ Export All (JSON)</button>
@@ -8696,6 +8933,105 @@ function icsTimestamp(d) {
   const pad = n => String(n).padStart(2, '0');
   return d.getUTCFullYear() + pad(d.getUTCMonth()+1) + pad(d.getUTCDate())
     + 'T' + pad(d.getUTCHours()) + pad(d.getUTCMinutes()) + pad(d.getUTCSeconds()) + 'Z';
+}
+
+// Copy the conference-feed URL to the clipboard. Used by Settings →
+// Sync & Data → Conference Calendar Feed.
+function copyConfFeedUrl() {
+  const url = $('#confFeedUrl');
+  if (!url) return;
+  url.select();
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url.value).then(
+        () => toast('URL copied to clipboard', 'success'),
+        () => { document.execCommand('copy'); toast('URL copied', 'success'); }
+      );
+    } else {
+      document.execCommand('copy');
+      toast('URL copied to clipboard', 'success');
+    }
+  } catch (e) {
+    toast('Could not copy automatically — select the URL and Ctrl+C', 'info');
+  }
+}
+
+// Build a filtered .ics file using the SAME logic the Cloud Function uses
+// (shared visibility, non-CA category, dueDate present). Lets a user
+// preview locally exactly what the conference inbox will receive — useful
+// before the cloud function is deployed, or for spot-checking.
+function downloadFilteredIcs() {
+  const icsTimestamp = (d) => {
+    const pad = n => String(n).padStart(2, '0');
+    return d.getUTCFullYear() + pad(d.getUTCMonth()+1) + pad(d.getUTCDate())
+      + 'T' + pad(d.getUTCHours()) + pad(d.getUTCMinutes()) + pad(d.getUTCSeconds()) + 'Z';
+  };
+  const icsDate = (s) => String(s).replace(/-/g, '');
+  const icsDateNext = (s) => {
+    const d = new Date(s + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + 1);
+    return icsDate(d.toISOString().slice(0, 10));
+  };
+  const isCa = (cat) => !!(cat && cat.name && /^\s*CA\b/i.test(cat.name));
+
+  const now = icsTimestamp(new Date());
+  const lines = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//VCA Schedule//Shared Deadlines//EN',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH',
+    'X-WR-CALNAME:VCA Shared Milestones',
+    'X-WR-CALDESC:Shared milestone deadlines from VCA Schedule (CA milestones excluded)',
+    'REFRESH-INTERVAL;VALUE=DURATION:PT1H',
+  ];
+  let n = 0;
+  for (const p of STATE.data.projects) {
+    const mgr = getEngineer(p.managerId);
+    for (const m of (p.milestones || [])) {
+      if (!m.dueDate) continue;
+      if ((m.visibility || 'shared') !== 'shared') continue;
+      const cat = getCategory(m.categoryId);
+      if (isCa(cat)) continue;
+      const status = getStatus(m.statusId);
+      const assigneeNames = (m.assigneeIds || [])
+        .map(id => getEngineer(id))
+        .filter(Boolean).map(e => e.name).join(', ');
+      const projNum = p.number ? `[${p.number}] ` : '';
+      const summary = `${projNum}${p.name} — ${m.name}`;
+      const desc = [
+        `Project: ${p.name}`,
+        p.number ? `Project Number: ${p.number}` : null,
+        p.client ? `Client: ${p.client}` : null,
+        mgr ? `Project Manager: ${mgr.name}` : null,
+        cat ? `Category: ${cat.name}` : null,
+        status ? `Status: ${status.name}` : null,
+        assigneeNames ? `Assignees: ${assigneeNames}` : null,
+        m.notes ? `\nNotes: ${m.notes}` : null,
+      ].filter(Boolean).join('\n');
+      lines.push('BEGIN:VEVENT');
+      lines.push(`UID:milestone-${m.id}@vca-schedule`);
+      lines.push(`DTSTAMP:${now}`);
+      lines.push(`DTSTART;VALUE=DATE:${icsDate(m.dueDate)}`);
+      lines.push(`DTEND;VALUE=DATE:${icsDateNext(m.dueDate)}`);
+      lines.push(`SUMMARY:${escapeIcs(summary)}`);
+      lines.push(`DESCRIPTION:${escapeIcs(desc)}`);
+      lines.push(`CATEGORIES:Milestone,${escapeIcs(p.name)}`);
+      lines.push('TRANSP:TRANSPARENT');
+      lines.push('END:VEVENT');
+      n++;
+    }
+  }
+  lines.push('END:VCALENDAR');
+  const ics = lines.join('\r\n');
+  const blob = new Blob([ics], { type: 'text/calendar' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `vca-shared-milestones-${todayStr()}.ics`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast(`Generated ${n} events. Same filter as the cloud feed.`, 'success');
 }
 
 function generateIcs() {
