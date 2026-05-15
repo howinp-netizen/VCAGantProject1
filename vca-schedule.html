@@ -2307,22 +2307,22 @@ function restoreFromTrash(trashId) {
   toast(`Restored ${entry.kind}: "${entry.item.name || '(unnamed)'}"`, 'success');
 }
 
-function permanentlyDeleteFromTrash(trashId) {
+async function permanentlyDeleteFromTrash(trashId) {
   if (!STATE.data.trash) return;
   const idx = STATE.data.trash.findIndex(t => t.id === trashId);
   if (idx < 0) return;
   const entry = STATE.data.trash[idx];
-  if (!confirm(`Permanently delete "${entry.item.name || '(unnamed)'}"?\n\nThis cannot be undone.`)) return;
+  if (!(await showConfirm(`Permanently delete "${entry.item.name || '(unnamed)'}"?\n\nThis cannot be undone.`, { title: 'Permanent Delete', confirmLabel: 'Delete', danger: true }))) return;
   STATE.data.trash.splice(idx, 1);
   saveData();
   renderTrashModal();
   toast('Permanently deleted', 'success');
 }
 
-function emptyTrash() {
+async function emptyTrash() {
   if (!STATE.data.trash || STATE.data.trash.length === 0) return;
   const n = STATE.data.trash.length;
-  if (!confirm(`Permanently delete all ${n} items in the trash?\n\nThis cannot be undone.`)) return;
+  if (!(await showConfirm(`Permanently delete all ${n} items in the trash?\n\nThis cannot be undone.`, { title: 'Empty Trash', confirmLabel: 'Delete all', danger: true }))) return;
   STATE.data.trash = [];
   saveData();
   renderTrashModal();
@@ -7096,7 +7096,7 @@ function openNewProjectModal() {
   setTimeout(() => $('#newProjNumber').focus(), 50);
 }
 
-function createProject() {
+async function createProject() {
   // Re-check permission in case the modal was opened via some other path.
   if (!canCreateProject(true)) { closeModal(); return; }
   const name = $('#newProjName').value.trim();
@@ -7105,8 +7105,11 @@ function createProject() {
   const client = $('#newProjClient').value.trim();
 
   // Duplicate detection — warn if a project with the same number or the
-  // same name already exists. Lets the user back out before creating
-  // accidental duplicates from typos or simultaneous entries.
+  // same name already exists. Uses our own showConfirm modal instead of
+  // native window.confirm, because Teams iframes (and other sandboxed
+  // contexts without allow-modals) silently return false from
+  // window.confirm — making the warning invisible to anyone using the
+  // app inside Teams.
   const dupByNumber = number ? STATE.data.projects.find(p => (p.number || '').trim().toLowerCase() === number.toLowerCase()) : null;
   const dupByName = STATE.data.projects.find(p => p.name.trim().toLowerCase() === name.toLowerCase());
   if (dupByNumber || dupByName) {
@@ -7114,9 +7117,11 @@ function createProject() {
     const reason = dupByNumber ? `project number "${number}"` : `project name "${name}"`;
     const owner = getEngineer(dup.createdBy) || getEngineer(dup.managerId);
     const ownerNote = owner ? ` (owned by ${owner.name})` : '';
-    if (!confirm(`A project with the same ${reason} already exists${ownerNote}.\n\nCreate this one anyway?`)) {
-      return;
-    }
+    const ok = await showConfirm(
+      `A project with the same ${reason} already exists${ownerNote}.\n\nCreate this one anyway?`,
+      { title: 'Duplicate Project', confirmLabel: 'Create anyway', cancelLabel: 'Cancel', danger: false }
+    );
+    if (!ok) return;
   }
 
   // The creator is always the project manager — owners are inseparable from
@@ -8461,9 +8466,9 @@ function openSettings() {
   }, 0);
 }
 
-function resetAllColorOverrides() {
+async function resetAllColorOverrides() {
   if (Object.keys(STATE.colorOverrides).length === 0) return;
-  if (!confirm('Reset all color overrides back to the team\'s shared colors? (Only affects your view.)')) return;
+  if (!(await showConfirm("Reset all color overrides back to the team's shared colors? (Only affects your view.)", { title: 'Reset Colors', confirmLabel: 'Reset', danger: false }))) return;
   clearAllColorOverrides();
   closeModal();
   openSettings();
