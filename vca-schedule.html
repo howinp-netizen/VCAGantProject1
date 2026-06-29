@@ -703,6 +703,50 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
   pointer-events: none;
 }
 
+/* Company holiday — overlaid on top of weekends so e.g. Christmas-on-Sunday
+   still reads as Christmas. Subtle reddish tint. The holiday name shows
+   in the cell tooltip on hover (set on the matching header day-cell). */
+.holiday-band {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(200, 90, 80, 0.18);
+  box-shadow: inset 1px 0 0 rgba(200, 90, 80, 0.5), inset -1px 0 0 rgba(200, 90, 80, 0.5);
+  z-index: 0; pointer-events: none;
+}
+
+/* Holiday-flag the matching cell in the day-zoom timeline header so the
+   date number itself stands out. Hover shows the holiday name via the
+   cell's native title tooltip. */
+.minor-cell.holiday {
+  background: rgba(200, 90, 80, 0.18);
+  color: rgba(200, 90, 80, 0.95);
+  font-weight: 700;
+  cursor: help;
+}
+.minor-cell.holiday .label-1 { color: rgba(160, 60, 50, 1); }
+.minor-cell.holiday .label-2 { color: rgba(160, 60, 50, 0.8); }
+
+/* Personal PTO band — only this user sees it. Olive-green so it's
+   visually distinct from holidays and weekends. The label shows in
+   the cell tooltip on hover. */
+.pto-band {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(110, 140, 90, 0.18);
+  box-shadow: inset 1px 0 0 rgba(110, 140, 90, 0.5), inset -1px 0 0 rgba(110, 140, 90, 0.5);
+  z-index: 0; pointer-events: none;
+}
+
+/* Day-cell PTO highlight — same scheme as holiday but olive green. */
+.minor-cell.pto {
+  background: rgba(110, 140, 90, 0.18);
+  font-weight: 700;
+  cursor: help;
+}
+.minor-cell.pto .label-1 { color: rgba(80, 110, 60, 1); }
+.minor-cell.pto .label-2 { color: rgba(80, 110, 60, 0.8); }
+/* If a cell is BOTH holiday and PTO, prefer the holiday color (red wins)
+   but still bold. */
+.minor-cell.holiday.pto { background: rgba(200, 90, 80, 0.20); }
+
 .bar {
   position: absolute; height: 18px; top: 7px; border-radius: 3px; cursor: pointer;
   display: flex; align-items: center; padding: 0 6px; font-size: 10px;
@@ -1038,6 +1082,24 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 .cal-day.other-month { background: var(--panel); opacity: 0.5; }
 .cal-day.today { background: var(--accent-soft); }
 .cal-day.weekend { background: var(--weekend); }
+/* Calendar day cells flagged as holiday / PTO. Subtle tint + a small
+   chip at the top so you can see what's going on without overwhelming
+   the milestone event listings. */
+.cal-day.is-holiday { background: rgba(200, 90, 80, 0.10); }
+.cal-day.is-pto     { background: rgba(110, 140, 90, 0.10); }
+.cal-day.is-holiday.is-pto { background: rgba(110, 140, 90, 0.18); }
+.cal-day-tag {
+  font-size: 9px; font-weight: 600; padding: 1px 4px;
+  border-radius: 2px; align-self: flex-start; margin-bottom: 2px;
+  letter-spacing: 0.2px; line-height: 1.3;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cal-day-tag.holiday-tag {
+  background: rgba(200, 90, 80, 0.20); color: rgba(200, 90, 80, 0.95);
+}
+.cal-day-tag.pto-tag {
+  background: rgba(110, 140, 90, 0.25); color: rgba(90, 120, 70, 1);
+}
 .cal-day-num { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
 .cal-day.today .cal-day-num { color: var(--accent); font-weight: 600; }
 .cal-events { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
@@ -1315,6 +1377,12 @@ const STATE = {
   // mark the parent project Complete if all its other milestones are Complete
   // too. Per-user preference. Saved via user prefs sync.
   autoCompleteProject: false,
+
+  // Personal PTO ranges (per-user local pref). Each entry is
+  //   { id, start: 'YYYY-MM-DD', end: 'YYYY-MM-DD', label }
+  // Stored only in this browser + synced via userPrefs so it follows
+  // the user across devices but never shows up for other people.
+  pto: [],
   sidePanelWidth: 760,
   searchQuery: '',
   firebase: null,
@@ -1376,6 +1444,82 @@ const startOfDay = (d) => { const r = new Date(d); r.setHours(0,0,0,0); return r
 const todayStr = () => fmtDate(new Date());
 const today = () => startOfDay(new Date());
 
+/* ============== HOLIDAYS ============== */
+//
+// US federal holidays the firm observes plus Day-after-Thanksgiving.
+// These are computed per-year on demand and cached so the same year
+// isn't recomputed on every render. Holidays are shared (same for
+// every user). PTO is separate and lives on STATE.pto, only visible
+// to the user who entered it.
+
+// Nth weekday of a month: nthWeekdayOf(2026, 4, 2, 1) → 1st Monday of May 2026
+// month is 1-12, weekday is 0=Sun..6=Sat, n is 1..5 or -1 for last.
+function nthWeekdayOf(year, month, weekday, n) {
+  if (n > 0) {
+    const first = new Date(year, month - 1, 1);
+    const offset = (7 + weekday - first.getDay()) % 7;
+    return new Date(year, month - 1, 1 + offset + (n - 1) * 7);
+  }
+  // last weekday of the month
+  const last = new Date(year, month, 0);  // last day of month
+  const offset = (7 + last.getDay() - weekday) % 7;
+  return new Date(year, month, 0 - offset);
+}
+
+// If a fixed-date holiday falls on a weekend, federal observance moves
+// it: Saturday → Friday before, Sunday → Monday after. Floating ones
+// (Memorial, Labor, Thanksgiving) already land on weekdays.
+function observedDate(d) {
+  const dow = d.getDay();
+  if (dow === 6) return addDays(d, -1);  // Sat → Fri
+  if (dow === 0) return addDays(d, 1);   // Sun → Mon
+  return d;
+}
+
+const _holidayCache = {};
+function getHolidaysForYear(year) {
+  if (_holidayCache[year]) return _holidayCache[year];
+  const list = [];
+  // New Year's Day — Jan 1 (observed)
+  list.push({ date: observedDate(new Date(year, 0, 1)), name: "New Year's Day" });
+  // Memorial Day — last Monday of May
+  list.push({ date: nthWeekdayOf(year, 5, 1, -1), name: 'Memorial Day' });
+  // Independence Day — July 4 (observed)
+  list.push({ date: observedDate(new Date(year, 6, 4)), name: 'Independence Day' });
+  // Labor Day — first Monday of September
+  list.push({ date: nthWeekdayOf(year, 9, 1, 1), name: 'Labor Day' });
+  // Thanksgiving — 4th Thursday of November
+  const thanksgiving = nthWeekdayOf(year, 11, 4, 4);
+  list.push({ date: thanksgiving, name: 'Thanksgiving' });
+  // Day after Thanksgiving — the Friday after
+  list.push({ date: addDays(thanksgiving, 1), name: 'Day after Thanksgiving' });
+  // Christmas — Dec 25 (observed)
+  list.push({ date: observedDate(new Date(year, 11, 25)), name: 'Christmas Day' });
+  // Normalize to YYYY-MM-DD strings for easy compare
+  const norm = list.map(h => ({ date: fmtDate(h.date), name: h.name }));
+  _holidayCache[year] = norm;
+  return norm;
+}
+
+// All holidays whose date falls in [fromStr, toStr] inclusive.
+function getHolidaysInRange(fromStr, toStr) {
+  const yFrom = parseInt(fromStr.slice(0, 4), 10);
+  const yTo   = parseInt(toStr.slice(0, 4), 10);
+  const out = [];
+  for (let y = yFrom; y <= yTo; y++) {
+    for (const h of getHolidaysForYear(y)) {
+      if (h.date >= fromStr && h.date <= toStr) out.push(h);
+    }
+  }
+  return out;
+}
+
+// PTO entries intersecting a range. (Multi-day ranges.)
+function getPtoInRange(fromStr, toStr) {
+  return (STATE.pto || []).filter(p => p.end >= fromStr && p.start <= toStr);
+}
+
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -1427,6 +1571,7 @@ function loadLocal() {
       }
       if (typeof parsed._workloadThreshold === 'number') STATE.workloadThreshold = parsed._workloadThreshold;
       if (typeof parsed._autoCompleteProject === 'boolean') STATE.autoCompleteProject = parsed._autoCompleteProject;
+      if (Array.isArray(parsed._pto)) STATE.pto = parsed._pto;
       if (parsed._filterBarLayout) STATE.filterBarLayout = { ...STATE.filterBarLayout, ...parsed._filterBarLayout };
       if (parsed._projectSort) STATE.projectSort = parsed._projectSort;
       // Restore UI state — view, filters, calendar toggles. Uses the
@@ -1523,6 +1668,7 @@ function saveLocal() {
       _columnSettings: STATE.columnSettings,
       _workloadThreshold: STATE.workloadThreshold,
       _autoCompleteProject: !!STATE.autoCompleteProject,
+      _pto: STATE.pto || [],
       _filterBarLayout: STATE.filterBarLayout,
       _projectSort: STATE.projectSort,
       // UI state cache — view, filters, calendar toggles
@@ -1571,6 +1717,7 @@ function buildUserPrefsPayload() {
     projectSort: STATE.projectSort || 'manual',
     workloadThreshold: STATE.workloadThreshold ?? 3,
     autoCompleteProject: !!STATE.autoCompleteProject,
+    pto: STATE.pto || [],
     // UI state — what view I'm in, what filters I've applied, calendar
     // toggle states. Persisting these means closing the tab and coming
     // back keeps me where I was.
@@ -1618,6 +1765,7 @@ function applyUserPrefsPayload(p) {
     if (typeof p.projectSort === 'string') STATE.projectSort = p.projectSort;
     if (typeof p.workloadThreshold === 'number') STATE.workloadThreshold = p.workloadThreshold;
     if (typeof p.autoCompleteProject === 'boolean') STATE.autoCompleteProject = p.autoCompleteProject;
+    if (Array.isArray(p.pto)) STATE.pto = p.pto;
     if (p.uiState && typeof p.uiState === 'object') {
       const u = p.uiState;
       if (typeof u.view === 'string')           STATE.view = u.view;
@@ -3759,6 +3907,26 @@ function renderGantt() {
                 bands += `<div class="weekend-band" style="left:${i * dayWidth}px; width:${dayWidth}px;"></div>`;
               }
             }
+            // Holiday bands — slightly tinted with the holiday color.
+            // Drawn over weekends so a Christmas-on-Sunday still reads
+            // as Christmas. Includes a small text tag.
+            const minStr = fmtDate(min);
+            const maxStr = fmtDate(addDays(min, totalDays - 1));
+            const holidays = getHolidaysInRange(minStr, maxStr);
+            for (const h of holidays) {
+              const offset = daysBetween(min, new Date(h.date + 'T00:00:00'));
+              if (offset < 0 || offset >= totalDays) continue;
+              bands += `<div class="holiday-band" style="left:${offset * dayWidth}px; width:${dayWidth}px;" title="${escapeHtml(h.name)}"></div>`;
+            }
+            // Personal PTO bands — only visible to this user.
+            const ptos = getPtoInRange(minStr, maxStr);
+            for (const p of ptos) {
+              const startOff = Math.max(0, daysBetween(min, new Date(p.start + 'T00:00:00')));
+              const endOff = Math.min(totalDays - 1, daysBetween(min, new Date(p.end + 'T00:00:00')));
+              if (endOff < startOff) continue;
+              const w = (endOff - startOff + 1) * dayWidth;
+              bands += `<div class="pto-band" style="left:${startOff * dayWidth}px; width:${w}px;" title="${escapeHtml(p.label || 'PTO')} (${p.start} → ${p.end})"></div>`;
+            }
             return bands;
           })()}
           ${gridHtml}
@@ -3929,7 +4097,18 @@ function renderTimelineHeader(min, totalDays, dayWidth) {
       }
       const isWknd = d.getDay() === 0 || d.getDay() === 6;
       const isToday = fmtDate(d) === todayStr();
-      minor += `<div class="minor-cell ${isWknd?'weekend':''} ${isToday?'today':''}" style="width: ${dayWidth}px;">
+      // Holiday + PTO lookup for the day-cell so the header shows which
+      // days are special, with the name on hover.
+      const ds = fmtDate(d);
+      const holiday = getHolidaysForYear(d.getFullYear()).find(h => h.date === ds);
+      const ptoEntry = (STATE.pto || []).find(p => ds >= p.start && ds <= p.end);
+      const flagCls = `${holiday ? 'holiday' : ''} ${ptoEntry ? 'pto' : ''}`;
+      let titleText = '';
+      if (holiday && ptoEntry) titleText = `${holiday.name} · ${ptoEntry.label || 'PTO'}`;
+      else if (holiday) titleText = holiday.name;
+      else if (ptoEntry) titleText = ptoEntry.label || 'PTO';
+      const titleAttr = titleText ? ` title="${escapeHtml(titleText)}"` : '';
+      minor += `<div class="minor-cell ${isWknd?'weekend':''} ${isToday?'today':''} ${flagCls}" style="width: ${dayWidth}px;"${titleAttr}>
         <span class="label-1">${d.getDate()}</span>
         <span class="label-2">${['S','M','T','W','T','F','S'][d.getDay()]}</span>
       </div>`;
@@ -3954,8 +4133,18 @@ function renderTimelineHeader(min, totalDays, dayWidth) {
       const isWknd = d.getDay() === 0 || d.getDay() === 6;
       const isToday = fmtDate(d) === todayStr();
       // Show day number on Mondays AND on today, so today is never hidden.
-      const showLabel = d.getDay() === 1 || isToday;
-      minor += `<div class="minor-cell ${isWknd?'weekend':''} ${isToday?'today':''}" style="width: ${dayWidth}px;">
+      // Also show day number on holidays + PTO so those days are easy to spot.
+      const ds = fmtDate(d);
+      const holiday = getHolidaysForYear(d.getFullYear()).find(h => h.date === ds);
+      const ptoEntry = (STATE.pto || []).find(p => ds >= p.start && ds <= p.end);
+      const showLabel = d.getDay() === 1 || isToday || !!holiday || !!ptoEntry;
+      const flagCls = `${holiday ? 'holiday' : ''} ${ptoEntry ? 'pto' : ''}`;
+      let titleText = '';
+      if (holiday && ptoEntry) titleText = `${holiday.name} · ${ptoEntry.label || 'PTO'}`;
+      else if (holiday) titleText = holiday.name;
+      else if (ptoEntry) titleText = ptoEntry.label || 'PTO';
+      const titleAttr = titleText ? ` title="${escapeHtml(titleText)}"` : '';
+      minor += `<div class="minor-cell ${isWknd?'weekend':''} ${isToday?'today':''} ${flagCls}" style="width: ${dayWidth}px;"${titleAttr}>
         ${showLabel ? `<span class="label-1">${d.getDate()}</span>` : ''}
       </div>`;
     }
@@ -6536,6 +6725,14 @@ function renderCalDay(date, otherMonth, eventsByDate) {
   const ds = fmtDate(date);
   const isToday = ds === todayStr();
   const isWknd = date.getDay() === 0 || date.getDay() === 6;
+
+  // Holiday / PTO lookup for the day. Holidays show for everyone; PTO is
+  // local to this user. Both show as a small tag at the top of the cell
+  // and tint the cell background subtly.
+  const yearHolidays = getHolidaysForYear(date.getFullYear());
+  const holiday = yearHolidays.find(h => h.date === ds);
+  const ptoEntry = (STATE.pto || []).find(p => ds >= p.start && ds <= p.end);
+
   const events = eventsByDate[ds] || [];
   const eventsHtml = events.map(e => {
     const isMilestone = e.kind !== 'task';
@@ -6557,8 +6754,10 @@ function renderCalDay(date, otherMonth, eventsByDate) {
       title="${escapeHtml(e.tooltip)}">${escapeHtml(e.label)}</div>`;
   }).join('');
   return `
-    <div class="cal-day ${otherMonth ? 'other-month' : ''} ${isToday ? 'today' : ''} ${isWknd && !otherMonth ? 'weekend' : ''}">
+    <div class="cal-day ${otherMonth ? 'other-month' : ''} ${isToday ? 'today' : ''} ${isWknd && !otherMonth ? 'weekend' : ''} ${holiday ? 'is-holiday' : ''} ${ptoEntry ? 'is-pto' : ''}" title="${holiday ? escapeHtml(holiday.name) : (ptoEntry ? escapeHtml(ptoEntry.label || 'PTO') : '')}">
       <div class="cal-day-num">${date.getDate()}</div>
+      ${holiday ? `<div class="cal-day-tag holiday-tag">${escapeHtml(holiday.name)}</div>` : ''}
+      ${ptoEntry ? `<div class="cal-day-tag pto-tag">${escapeHtml(ptoEntry.label || 'PTO')}</div>` : ''}
       <div class="cal-events">${eventsHtml}</div>
     </div>
   `;
@@ -8267,6 +8466,28 @@ function openSettings() {
                   </span>
                 </label>
               </div>
+              <div class="settings-block">
+                <div class="settings-block-label" style="display:flex; justify-content:space-between; align-items:center;">
+                  <span>My Time Off</span>
+                  <button class="btn small" onclick="addPtoEntry()">+ Add PTO</button>
+                </div>
+                <div class="settings-block-help">
+                  Personal vacation / time off. Shows as a green band on your Gantt &amp; Calendar so you can spot which deadlines fall in your PTO. Only visible to you.
+                </div>
+                <div id="ptoList">${renderPtoList()}</div>
+
+                <div class="settings-block-label" style="margin-top:14px;">Company Holidays</div>
+                <div class="settings-block-help">
+                  Auto-generated US federal holidays the firm observes — New Year's Day, Memorial Day, Independence Day, Labor Day, Thanksgiving + the day after, Christmas Day. Visible to everyone, no setup needed.
+                </div>
+                <div style="font-size:11px; color:var(--text-dim);">
+                  ${(() => {
+                    const upcoming = getHolidaysInRange(todayStr(), fmtDate(addDays(today(), 365))).slice(0, 8);
+                    if (!upcoming.length) return '<em>None in the next year</em>';
+                    return upcoming.map(h => `<div style="padding:2px 0;">• <strong>${escapeHtml(h.name)}</strong> — ${h.date}</div>`).join('');
+                  })()}
+                </div>
+              </div>
             </section>
 
             <section class="settings-tab" data-tab="team" hidden>
@@ -8453,6 +8674,7 @@ function openSettings() {
   // Wire personal color override pickers — these update the user's local
   // preference immediately (no Save needed) since overrides are local-only.
   setTimeout(() => {
+    wirePtoInputs();
     $$('input[data-color-override-eng-id]').forEach(input => {
       input.addEventListener('input', (e) => {
         const engId = input.dataset.colorOverrideEngId;
@@ -8616,6 +8838,74 @@ function saveSettings() {
   renderAll();
   toast('Settings saved', 'success');
 }
+
+// PTO management — personal (per-user) vacation entries used to tint
+// the Gantt / Calendar so deadline conflicts with time off are visible.
+function renderPtoList() {
+  const list = STATE.pto || [];
+  if (list.length === 0) {
+    return '<div style="font-size:11px; color:var(--text-faint); padding:6px 0;">No PTO entries yet. Click "+ Add PTO" to add one.</div>';
+  }
+  // Sort by start date so the closest one is at the top
+  const sorted = list.slice().sort((a, b) => a.start.localeCompare(b.start));
+  return sorted.map(p => `
+    <div class="pto-row" style="display:flex; gap:8px; align-items:center; padding:6px 0; border-bottom:1px solid var(--grid);">
+      <input type="text" data-pto-field="label" data-pto-id="${p.id}" value="${escapeHtml(p.label || '')}" placeholder="Label (e.g. Hawaii trip)" style="flex:1; font-size:12px;" />
+      <input type="date" data-pto-field="start" data-pto-id="${p.id}" value="${p.start}" style="width:140px; font-size:12px;" />
+      <span style="color:var(--text-faint); font-size:11px;">→</span>
+      <input type="date" data-pto-field="end" data-pto-id="${p.id}" value="${p.end}" style="width:140px; font-size:12px;" />
+      <button class="btn small danger" onclick="removePtoEntry('${p.id}')" title="Remove">×</button>
+    </div>
+  `).join('');
+}
+
+function refreshPtoList() {
+  const el = $('#ptoList');
+  if (el) el.innerHTML = renderPtoList();
+  wirePtoInputs();
+}
+
+function wirePtoInputs() {
+  $$('[data-pto-field]').forEach(input => {
+    input.addEventListener('change', () => {
+      const id = input.dataset.ptoId;
+      const field = input.dataset.ptoField;
+      const entry = (STATE.pto || []).find(p => p.id === id);
+      if (!entry) return;
+      entry[field] = input.value;
+      // If end < start, snap end to start
+      if (entry.end < entry.start) entry.end = entry.start;
+      saveLocal();
+      scheduleUserPrefsSync();
+      renderAll();  // refresh gantt/calendar bands
+    });
+  });
+}
+
+function addPtoEntry() {
+  if (!STATE.pto) STATE.pto = [];
+  const t = todayStr();
+  STATE.pto.push({
+    id: uid('pto'),
+    label: '',
+    start: t,
+    end: t,
+  });
+  saveLocal();
+  scheduleUserPrefsSync();
+  refreshPtoList();
+  renderAll();
+}
+window.addPtoEntry = addPtoEntry;
+
+function removePtoEntry(id) {
+  STATE.pto = (STATE.pto || []).filter(p => p.id !== id);
+  saveLocal();
+  scheduleUserPrefsSync();
+  refreshPtoList();
+  renderAll();
+}
+window.removePtoEntry = removePtoEntry;
 
 function addEngineer() {
   const idx = STATE.data.engineers.length;
