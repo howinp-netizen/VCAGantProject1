@@ -7414,6 +7414,11 @@ async function createProject() {
 }
 
 function closeModal() {
+  // If the settings modal is closing mid-PTO-edit, persist whatever the
+  // user typed so it doesn't get lost just because they didn't click Save.
+  if (typeof commitEditingPto === 'function') {
+    commitEditingPto();
+  }
   $('#modalRoot').innerHTML = '';
   flushPendingSnapshotIfIdle();
 }
@@ -8841,6 +8846,11 @@ function saveSettings() {
 
 // PTO management — personal (per-user) vacation entries used to tint
 // the Gantt / Calendar so deadline conflicts with time off are visible.
+// Which PTO entry is currently in edit mode in the Settings modal.
+// Only one can be edited at a time; clicking Edit on another entry
+// auto-saves whichever was open. Cleared when settings modal closes.
+let _editingPtoId = null;
+
 function renderPtoList() {
   const list = STATE.pto || [];
   if (list.length === 0) {
@@ -8848,15 +8858,58 @@ function renderPtoList() {
   }
   // Sort by start date so the closest one is at the top
   const sorted = list.slice().sort((a, b) => a.start.localeCompare(b.start));
-  return sorted.map(p => `
-    <div class="pto-row" style="display:flex; gap:8px; align-items:center; padding:6px 0; border-bottom:1px solid var(--grid);">
-      <input type="text" data-pto-field="label" data-pto-id="${p.id}" value="${escapeHtml(p.label || '')}" placeholder="Label (e.g. Hawaii trip)" style="flex:1; font-size:12px;" />
-      <input type="date" data-pto-field="start" data-pto-id="${p.id}" value="${p.start}" style="width:140px; font-size:12px;" />
-      <span style="color:var(--text-faint); font-size:11px;">→</span>
-      <input type="date" data-pto-field="end" data-pto-id="${p.id}" value="${p.end}" style="width:140px; font-size:12px;" />
+  return sorted.map(p => {
+    if (p.id === _editingPtoId) return renderPtoEditCard(p);
+    return renderPtoSummaryCard(p);
+  }).join('');
+}
+
+function renderPtoSummaryCard(p) {
+  const label = (p.label || '').trim() || '<span style="color:var(--text-faint); font-style:italic;">(no label)</span>';
+  const dateRange = p.start === p.end
+    ? formatShortDate(p.start)
+    : `${formatShortDate(p.start)} → ${formatShortDate(p.end)}`;
+  // Day count for context — "3 days", "1 day"
+  const days = daysBetween(new Date(p.start + 'T00:00:00Z'), new Date(p.end + 'T00:00:00Z')) + 1;
+  const dayLabel = days === 1 ? '1 day' : `${days} days`;
+  return `
+    <div class="pto-card" style="display:flex; gap:10px; align-items:center; padding:10px 12px; margin-bottom:6px; background:rgba(110,140,90,0.08); border-left:3px solid rgba(110,140,90,0.7); border-radius:3px;">
+      <div style="flex:1; min-width:0;">
+        <div style="font-weight:600; font-size:13px; color:var(--text); margin-bottom:2px;">${label}</div>
+        <div style="font-size:11px; color:var(--text-dim);">${dateRange} <span style="color:var(--text-faint);">· ${dayLabel}</span></div>
+      </div>
+      <button class="btn small" onclick="startEditPto('${p.id}')" title="Edit">Edit</button>
       <button class="btn small danger" onclick="removePtoEntry('${p.id}')" title="Remove">×</button>
     </div>
-  `).join('');
+  `;
+}
+
+function renderPtoEditCard(p) {
+  return `
+    <div class="pto-card pto-card-editing" style="padding:12px; margin-bottom:6px; background:var(--panel-2); border-left:3px solid var(--accent); border-radius:3px;">
+      <div style="display:grid; grid-template-columns: 1fr auto; gap:8px; align-items:end;">
+        <div>
+          <label style="font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.4px;">Label</label>
+          <input type="text" id="ptoEditLabel" value="${escapeHtml(p.label || '')}" placeholder="e.g. Hawaii trip" style="width:100%; font-size:13px; margin-top:2px;" />
+        </div>
+      </div>
+      <div style="display:grid; grid-template-columns: 1fr auto 1fr; gap:8px; align-items:end; margin-top:10px;">
+        <div>
+          <label style="font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.4px;">Start</label>
+          <input type="date" id="ptoEditStart" value="${p.start}" style="width:100%; font-size:13px; margin-top:2px;" />
+        </div>
+        <span style="color:var(--text-faint); padding-bottom:6px;">→</span>
+        <div>
+          <label style="font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.4px;">End</label>
+          <input type="date" id="ptoEditEnd" value="${p.end}" min="${p.start}" style="width:100%; font-size:13px; margin-top:2px;" />
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; margin-top:12px; justify-content:flex-end;">
+        <button class="btn small" onclick="cancelEditPto('${p.id}')">Cancel</button>
+        <button class="btn primary small" onclick="saveEditPto('${p.id}')">Save</button>
+      </div>
+    </div>
+  `;
 }
 
 function refreshPtoList() {
@@ -8865,40 +8918,115 @@ function refreshPtoList() {
   wirePtoInputs();
 }
 
+// Wire the start-date input to update the end-date input's `min` attribute
+// in real time, so the end-date picker won't even offer dates before the
+// chosen start. Also snap end forward if it's now before the new start.
 function wirePtoInputs() {
-  $$('[data-pto-field]').forEach(input => {
-    input.addEventListener('change', () => {
-      const id = input.dataset.ptoId;
-      const field = input.dataset.ptoField;
-      const entry = (STATE.pto || []).find(p => p.id === id);
-      if (!entry) return;
-      entry[field] = input.value;
-      // If end < start, snap end to start
-      if (entry.end < entry.start) entry.end = entry.start;
-      saveLocal();
-      scheduleUserPrefsSync();
-      renderAll();  // refresh gantt/calendar bands
+  const startEl = $('#ptoEditStart');
+  const endEl = $('#ptoEditEnd');
+  if (startEl && endEl) {
+    startEl.addEventListener('change', () => {
+      endEl.min = startEl.value;
+      if (endEl.value && endEl.value < startEl.value) {
+        endEl.value = startEl.value;
+      }
     });
-  });
+  }
 }
 
-function addPtoEntry() {
-  if (!STATE.pto) STATE.pto = [];
-  const t = todayStr();
-  STATE.pto.push({
-    id: uid('pto'),
-    label: '',
-    start: t,
-    end: t,
-  });
+function startEditPto(id) {
+  // If something else was being edited, commit its current values first so
+  // switching between cards doesn't lose typed input.
+  if (_editingPtoId && _editingPtoId !== id) {
+    commitEditingPto();
+  }
+  _editingPtoId = id;
+  refreshPtoList();
+  setTimeout(() => $('#ptoEditLabel')?.focus(), 30);
+}
+window.startEditPto = startEditPto;
+
+function saveEditPto(id) {
+  const entry = (STATE.pto || []).find(p => p.id === id);
+  if (!entry) return;
+  const label = $('#ptoEditLabel')?.value.trim() || '';
+  const start = $('#ptoEditStart')?.value || entry.start;
+  let end = $('#ptoEditEnd')?.value || entry.end;
+  if (end < start) end = start;
+  entry.label = label;
+  entry.start = start;
+  entry.end = end;
+  _editingPtoId = null;
   saveLocal();
   scheduleUserPrefsSync();
   refreshPtoList();
   renderAll();
 }
+window.saveEditPto = saveEditPto;
+
+function cancelEditPto(id) {
+  const entry = (STATE.pto || []).find(p => p.id === id);
+  // If this was a freshly-added entry with no label and same-day default
+  // range and the user hits Cancel, remove it rather than leaving an
+  // empty card behind.
+  if (entry && !entry.label && entry.start === entry.end && entry._fresh) {
+    STATE.pto = STATE.pto.filter(p => p.id !== id);
+    saveLocal();
+    scheduleUserPrefsSync();
+  }
+  _editingPtoId = null;
+  refreshPtoList();
+  renderAll();
+}
+window.cancelEditPto = cancelEditPto;
+
+// Save whatever is in the edit form right now (called when switching
+// between entries or closing the modal). No-op if no entry is being
+// edited.
+function commitEditingPto() {
+  if (!_editingPtoId) return;
+  const entry = (STATE.pto || []).find(p => p.id === _editingPtoId);
+  if (!entry) { _editingPtoId = null; return; }
+  const labelEl = $('#ptoEditLabel');
+  const startEl = $('#ptoEditStart');
+  const endEl = $('#ptoEditEnd');
+  if (labelEl) entry.label = labelEl.value.trim();
+  if (startEl) entry.start = startEl.value || entry.start;
+  if (endEl) entry.end = endEl.value || entry.end;
+  if (entry.end < entry.start) entry.end = entry.start;
+  delete entry._fresh;
+  _editingPtoId = null;
+  saveLocal();
+  scheduleUserPrefsSync();
+}
+
+function addPtoEntry() {
+  // Commit any in-flight edit first to avoid losing the previous entry's
+  // typed label (the original bug: the previous input's `change` event
+  // never fired because the button click stole focus).
+  commitEditingPto();
+  if (!STATE.pto) STATE.pto = [];
+  const t = todayStr();
+  const entry = {
+    id: uid('pto'),
+    label: '',
+    start: t,
+    end: t,
+    _fresh: true,  // flag for Cancel-removes-empty-card logic
+  };
+  STATE.pto.push(entry);
+  _editingPtoId = entry.id;
+  saveLocal();
+  scheduleUserPrefsSync();
+  refreshPtoList();
+  renderAll();
+  setTimeout(() => $('#ptoEditLabel')?.focus(), 30);
+}
 window.addPtoEntry = addPtoEntry;
 
 function removePtoEntry(id) {
+  // If we're removing the one being edited, exit edit mode.
+  if (_editingPtoId === id) _editingPtoId = null;
   STATE.pto = (STATE.pto || []).filter(p => p.id !== id);
   saveLocal();
   scheduleUserPrefsSync();
