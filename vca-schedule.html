@@ -504,27 +504,11 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 
 .row { height: 32px; display: flex; align-items: center; border-bottom: 1px solid var(--grid); position: relative; }
 
-/* Project rows are section headers, not entries. They should read as a
-   noticeably heavier "band" separating projects — taller than milestone/
-   task rows, denser typography, a small accent bar on the left, and a
-   bit of breathing room above so each project block feels like a card. */
 .row.project-row {
-  height: 40px;
-  background: linear-gradient(90deg, rgba(212, 165, 116, 0.10), rgba(212, 165, 116, 0.02));
-  font-weight: 700; font-size: 14px;
-  color: var(--text);
-  border-top: 1px solid var(--border-strong);
+  background: linear-gradient(90deg, rgba(212, 165, 116, 0.10), rgba(212, 165, 116, 0.02)), var(--panel);
+  font-weight: 600; font-size: 13px;
+  border-top: 3px solid var(--bg);
   border-bottom: 1px solid var(--border-strong);
-  box-shadow: inset 4px 0 0 var(--accent);
-  letter-spacing: 0.1px;
-}
-/* Give some vertical breathing room above every project row EXCEPT the
-   very first one on the chart, so successive projects visually chunk
-   apart without a giant gap at the top. Rendered as a top border on
-   the grid side too — see grid CSS. */
-.row.project-row + .row.milestone-row,
-.row.project-row + .row {
-  margin-top: 0;
 }
 
 .row.milestone-row { font-size: 12px; }
@@ -726,10 +710,8 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
 .row-grid.is-completed { opacity: 0.5; }
 .row-grid.is-completed:hover { opacity: 1; transition: opacity 0.12s; }
 .row-grid.project-row {
-  height: 40px;
   background: linear-gradient(90deg, rgba(212, 165, 116, 0.06), transparent);
-  border-top: 1px solid var(--border-strong);
-  border-bottom: 1px solid var(--border-strong);
+  border-top: 3px solid var(--bg);
 }
 
 /* Weekend background bands inside the Gantt body. Behind rows so the
