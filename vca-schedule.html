@@ -4152,12 +4152,12 @@ function renderTimelineHeader(min, totalDays, dayWidth) {
       }
       const isWknd = d.getDay() === 0 || d.getDay() === 6;
       const isToday = fmtDate(d) === todayStr();
-      // Show day number on Mondays AND on today, so today is never hidden.
-      // Also show day number on holidays + PTO so those days are easy to spot.
       const ds = fmtDate(d);
       const holiday = getHolidaysForYear(d.getFullYear()).find(h => h.date === ds);
       const ptoEntry = (STATE.pto || []).find(p => ds >= p.start && ds <= p.end);
-      const showLabel = d.getDay() === 1 || isToday || !!holiday || !!ptoEntry;
+      // Show day number on Monday and Friday (week bounds), on today so
+      // it's never hidden, and on holidays/PTO for easy spotting.
+      const showLabel = d.getDay() === 1 || d.getDay() === 5 || isToday || !!holiday || !!ptoEntry;
       const flagCls = `${holiday ? 'holiday' : ''} ${ptoEntry ? 'pto' : ''}`;
       let titleText = '';
       if (holiday && ptoEntry) titleText = `${holiday.name} · ${ptoEntry.label || 'PTO'}`;
