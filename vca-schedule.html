@@ -81,7 +81,7 @@ body {
   position: relative; margin-left: 8px;
 }
 .search-box input {
-  width: 220px; padding: 5px 10px 5px 30px; border-radius: 4px;
+  width: 220px; padding: 5px 34px 5px 30px; border-radius: 4px;
   font-size: 12px; transition: width 0.15s;
   /* Search icon as background so it sits inside the padding area only and
      can never overlap with the input text or placeholder. */
@@ -91,6 +91,52 @@ body {
   background-size: 14px 14px;
 }
 .search-box input:focus { width: 320px; }
+
+/* Advanced-search gear button, sits inside the search input's right
+   padding. Opens a small form panel with per-field filters. */
+.search-advanced-btn {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 24px; height: 24px; padding: 0;
+  background: transparent; border: 0; color: var(--text-faint);
+  cursor: pointer; font-size: 14px; line-height: 1;
+  border-radius: 3px;
+}
+.search-advanced-btn:hover { background: var(--panel-2); color: var(--accent); }
+
+.search-advanced-panel {
+  position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px;
+  width: 340px;
+  background: var(--panel); border: 1px solid var(--border-strong); border-radius: 4px;
+  z-index: 60; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  display: none;
+}
+.search-advanced-panel.show { display: block; }
+.adv-search-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--accent); font-weight: 600;
+}
+.adv-search-body { padding: 8px 12px; }
+.adv-search-row {
+  display: grid; grid-template-columns: 100px 1fr; gap: 8px;
+  align-items: center; margin-bottom: 6px;
+}
+.adv-search-row label { font-size: 11px; color: var(--text-dim); }
+.adv-search-row input,
+.adv-search-row select { font-size: 12px; padding: 4px 6px; width: 100%; }
+.adv-search-hint {
+  margin: 10px 0 6px 0; padding: 6px 8px;
+  background: var(--panel-2); border-radius: 3px;
+  font-size: 10px; color: var(--text-faint);
+}
+.adv-search-hint code {
+  background: var(--bg); padding: 1px 4px; border-radius: 2px;
+  font-size: 10px; color: var(--accent);
+}
+.adv-search-actions {
+  display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px;
+}
 .search-results {
   position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px;
   background: var(--panel); border: 1px solid var(--border-strong); border-radius: 4px;
@@ -497,10 +543,14 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
   /* Reserve a fixed-width scrollbar gutter so that scrollbar appearing/disappearing
      does NOT shift cell positions when popups open or content height changes. */
   scrollbar-gutter: stable;
+  /* Stop wheel from chaining to parent — at the ends of the list the
+     browser was falling back to page-level inertial scroll, which felt
+     like the list was "decelerating" as it reached top/bottom. */
+  overscroll-behavior: contain;
 }
 .gantt-side-body-inner { min-width: 100%; }
 
-.gantt-grid-wrap { flex: 1; overflow: auto; position: relative; min-width: 0; }
+.gantt-grid-wrap { flex: 1; overflow: auto; position: relative; min-width: 0; overscroll-behavior: contain; }
 
 .row { height: 32px; display: flex; align-items: center; border-bottom: 1px solid var(--grid); position: relative; }
 
@@ -1230,7 +1280,9 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
   </div>
   <div class="search-box">
     <input type="text" id="searchInput" placeholder="Search projects, milestones..." autocomplete="off" />
+    <button class="search-advanced-btn" id="searchAdvancedBtn" title="Advanced search (filter by field)">⚙</button>
     <div class="search-results" id="searchResults"></div>
+    <div class="search-advanced-panel" id="searchAdvancedPanel"></div>
   </div>
   <div class="topbar-right">
     <div class="tool-group" style="margin-right: 4px;">
@@ -3593,6 +3645,160 @@ function applyEdits() {
 }
 
 /* ============== SEARCH ============== */
+// Parse a raw search string into { free, filters } where `filters` is a
+// map of field → value (lower-cased). Supported tags:
+//   num:L1234        — project number contains
+//   name:library     — project OR milestone name contains
+//   pname:library    — project name only
+//   mname:submittal  — milestone name only
+//   client:pusd
+//   mgr:noah         — manager name contains (any part)
+//   cat:ca           — category name contains (milestones only)
+//   status:complete
+//   assignee:amy
+//   type:project     — restrict to projects only (type:milestone works too)
+// Any bare words go into `free` and match project name/number/client OR
+// milestone name (the existing behavior).
+// Open/close the advanced-search panel — a small form the user can fill
+// out instead of typing tag syntax. On Apply, we build the tag string
+// and drop it into the search input, which triggers the normal search.
+function toggleAdvancedSearch() {
+  const panel = $('#searchAdvancedPanel');
+  if (!panel) return;
+  if (panel.classList.contains('show')) {
+    panel.classList.remove('show');
+    return;
+  }
+  $('#searchResults')?.classList.remove('show');
+  renderAdvancedSearchPanel();
+  panel.classList.add('show');
+}
+window.toggleAdvancedSearch = toggleAdvancedSearch;
+
+function renderAdvancedSearchPanel() {
+  const panel = $('#searchAdvancedPanel');
+  if (!panel) return;
+  const engOpts = '<option value="">— Any —</option>' + STATE.data.engineers.map(e =>
+    `<option value="${escapeHtml(e.name)}">${escapeHtml(e.name)}</option>`
+  ).join('');
+  const catOpts = '<option value="">— Any —</option>' + STATE.data.categories.map(c =>
+    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`
+  ).join('');
+  const statusOpts = '<option value="">— Any —</option>' + STATE.data.statuses.map(s =>
+    `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`
+  ).join('');
+  panel.innerHTML = `
+    <div class="adv-search-header">
+      <span>Advanced Search</span>
+      <button class="btn small" onclick="toggleAdvancedSearch()" title="Close">×</button>
+    </div>
+    <div class="adv-search-body">
+      <div class="adv-search-row">
+        <label>Project number</label>
+        <input type="text" id="advNum" placeholder="e.g. L1234" />
+      </div>
+      <div class="adv-search-row">
+        <label>Project name</label>
+        <input type="text" id="advPname" placeholder="e.g. Library" />
+      </div>
+      <div class="adv-search-row">
+        <label>Milestone name</label>
+        <input type="text" id="advMname" placeholder="e.g. DSA Submittal" />
+      </div>
+      <div class="adv-search-row">
+        <label>Client</label>
+        <input type="text" id="advClient" placeholder="e.g. PUSD" />
+      </div>
+      <div class="adv-search-row">
+        <label>Manager</label>
+        <select id="advMgr">${engOpts}</select>
+      </div>
+      <div class="adv-search-row">
+        <label>Assignee</label>
+        <select id="advAssignee">${engOpts}</select>
+      </div>
+      <div class="adv-search-row">
+        <label>Category</label>
+        <select id="advCat">${catOpts}</select>
+      </div>
+      <div class="adv-search-row">
+        <label>Status</label>
+        <select id="advStatus">${statusOpts}</select>
+      </div>
+      <div class="adv-search-row">
+        <label>Result type</label>
+        <select id="advType">
+          <option value="">Projects &amp; Milestones</option>
+          <option value="project">Projects only</option>
+          <option value="milestone">Milestones only</option>
+        </select>
+      </div>
+      <div class="adv-search-hint">
+        Tip — you can also type in the search box directly:
+        <code>num:L1234 mgr:Noah cat:CA</code>
+      </div>
+      <div class="adv-search-actions">
+        <button class="btn small" onclick="clearAdvancedSearch()">Clear</button>
+        <button class="btn primary small" onclick="applyAdvancedSearch()">Apply</button>
+      </div>
+    </div>
+  `;
+}
+
+// Escape values that contain spaces so they parse as one token.
+function _quoteIfNeeded(v) {
+  if (!v) return '';
+  return /\s/.test(v) ? `"${v}"` : v;
+}
+
+function applyAdvancedSearch() {
+  const parts = [];
+  const map = [
+    ['num', '#advNum'], ['pname', '#advPname'], ['mname', '#advMname'],
+    ['client', '#advClient'], ['mgr', '#advMgr'], ['assignee', '#advAssignee'],
+    ['cat', '#advCat'], ['status', '#advStatus'], ['type', '#advType'],
+  ];
+  for (const [tag, sel] of map) {
+    const v = ($(sel)?.value || '').trim();
+    if (v) parts.push(`${tag}:${_quoteIfNeeded(v)}`);
+  }
+  const query = parts.join(' ');
+  const input = $('#searchInput');
+  if (input) {
+    input.value = query;
+    performSearch(query);
+  }
+  $('#searchAdvancedPanel')?.classList.remove('show');
+}
+window.applyAdvancedSearch = applyAdvancedSearch;
+
+function clearAdvancedSearch() {
+  ['#advNum','#advPname','#advMname','#advClient','#advMgr','#advAssignee','#advCat','#advStatus','#advType']
+    .forEach(sel => { const el = $(sel); if (el) el.value = ''; });
+}
+window.clearAdvancedSearch = clearAdvancedSearch;
+
+function parseSearchQuery(raw) {
+  const filters = {};
+  const freeParts = [];
+  const tokens = raw.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+  for (const tok of tokens) {
+    const m = tok.match(/^(num|name|pname|mname|client|mgr|manager|cat|category|status|assignee|type):(.+)$/i);
+    if (m) {
+      let key = m[1].toLowerCase();
+      if (key === 'manager') key = 'mgr';
+      if (key === 'category') key = 'cat';
+      let val = m[2];
+      // Strip surrounding quotes if present
+      if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+      filters[key] = val.toLowerCase();
+    } else {
+      freeParts.push(tok.replace(/^"|"$/g, ''));
+    }
+  }
+  return { free: freeParts.join(' ').trim().toLowerCase(), filters };
+}
+
 function performSearch(q) {
   STATE.searchQuery = q.trim();
   const results = $('#searchResults');
@@ -3602,20 +3808,74 @@ function performSearch(q) {
     renderAll();
     return;
   }
-  const ql = STATE.searchQuery.toLowerCase();
+  const { free, filters } = parseSearchQuery(STATE.searchQuery);
   const found = [];
-  for (const p of STATE.data.projects) {
-    if (p.name.toLowerCase().includes(ql) || (p.client || '').toLowerCase().includes(ql) || (p.number || '').toLowerCase().includes(ql)) {
+
+  const projectMatchesFilters = (p) => {
+    if (filters.num && !(p.number || '').toLowerCase().includes(filters.num)) return false;
+    if (filters.pname && !p.name.toLowerCase().includes(filters.pname)) return false;
+    if (filters.name && !p.name.toLowerCase().includes(filters.name)) return false;
+    if (filters.client && !(p.client || '').toLowerCase().includes(filters.client)) return false;
+    if (filters.mgr) {
       const mgr = getEngineer(p.managerId);
-      found.push({
-        type: 'project',
-        projectId: p.id,
-        title: (p.number ? `${p.number} · ` : '') + p.name,
-        meta: `${p.client || 'No client'}${mgr ? ' · Manager: ' + mgr.name : ''}`,
-      });
+      if (!mgr || !mgr.name.toLowerCase().includes(filters.mgr)) return false;
     }
-    for (const m of (p.milestones || [])) {
-      if (m.name.toLowerCase().includes(ql)) {
+    if (filters.status) {
+      const st = getStatus(p.statusId);
+      if (!st || !st.name.toLowerCase().includes(filters.status)) return false;
+    }
+    return true;
+  };
+
+  const milestoneMatchesFilters = (m, p) => {
+    if (filters.num && !(p.number || '').toLowerCase().includes(filters.num)) return false;
+    if (filters.pname && !p.name.toLowerCase().includes(filters.pname)) return false;
+    if (filters.mname && !m.name.toLowerCase().includes(filters.mname)) return false;
+    if (filters.name && !m.name.toLowerCase().includes(filters.name) && !p.name.toLowerCase().includes(filters.name)) return false;
+    if (filters.client && !(p.client || '').toLowerCase().includes(filters.client)) return false;
+    if (filters.mgr) {
+      const mgr = getEngineer(p.managerId);
+      if (!mgr || !mgr.name.toLowerCase().includes(filters.mgr)) return false;
+    }
+    if (filters.cat) {
+      const cat = getCategory(m.categoryId);
+      if (!cat || !cat.name.toLowerCase().includes(filters.cat)) return false;
+    }
+    if (filters.status) {
+      const st = getStatus(m.statusId);
+      if (!st || !st.name.toLowerCase().includes(filters.status)) return false;
+    }
+    if (filters.assignee) {
+      const names = (m.assigneeIds || []).map(id => (getEngineer(id) || {}).name || '').join(' ').toLowerCase();
+      if (!names.includes(filters.assignee)) return false;
+    }
+    return true;
+  };
+
+  const wantProjects   = !filters.type || filters.type.startsWith('proj');
+  const wantMilestones = !filters.type || filters.type.startsWith('mile') || filters.type.startsWith('ms');
+
+  for (const p of STATE.data.projects) {
+    if (wantProjects && projectMatchesFilters(p)) {
+      const freeOk = !free ||
+        p.name.toLowerCase().includes(free) ||
+        (p.client || '').toLowerCase().includes(free) ||
+        (p.number || '').toLowerCase().includes(free);
+      if (freeOk) {
+        const mgr = getEngineer(p.managerId);
+        found.push({
+          type: 'project',
+          projectId: p.id,
+          title: (p.number ? `${p.number} · ` : '') + p.name,
+          meta: `${p.client || 'No client'}${mgr ? ' · Manager: ' + mgr.name : ''}`,
+        });
+      }
+    }
+    if (wantMilestones) {
+      for (const m of (p.milestones || [])) {
+        if (!milestoneMatchesFilters(m, p)) continue;
+        const freeOk = !free || m.name.toLowerCase().includes(free) || p.name.toLowerCase().includes(free) || (p.number || '').toLowerCase().includes(free);
+        if (!freeOk) continue;
         const cat = getCategory(m.categoryId);
         found.push({
           type: 'milestone',
@@ -9913,10 +10173,15 @@ async function init() {
   $('#searchInput').addEventListener('focus', (e) => {
     if (e.target.value) performSearch(e.target.value);
   });
-  // Close search on outside click
+  $('#searchAdvancedBtn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleAdvancedSearch();
+  });
+  // Close search + advanced panel on outside click
   document.addEventListener('click', (e) => {
     if (!e.target.closest('.search-box')) {
       $('#searchResults').classList.remove('show');
+      $('#searchAdvancedPanel')?.classList.remove('show');
     }
   });
   // Keyboard: Cmd/Ctrl + K to focus search; Cmd/Ctrl + N for Quick Add
