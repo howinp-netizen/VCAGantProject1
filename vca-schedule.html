@@ -4248,6 +4248,21 @@ function renderGantt() {
     syncing = false;
   });
 
+  // Wheel on the side pane: forward it to the grid directly. Previously
+  // the side pane scrolled first and the grid followed via the scroll
+  // sync — but at list ends, if side and grid have mismatched max
+  // scrollTop (even by 1px due to sub-pixel row heights), the side
+  // reaches its end before the grid does, blocking further wheel input
+  // until the user "primes" the grid pane itself. Forwarding wheel to
+  // the grid directly keeps both panes using the same scrollable
+  // extent, so scrolling feels uniform all the way to the bottom.
+  sideScroll.addEventListener('wheel', (e) => {
+    // Only intercept vertical wheel; let horizontal/trackpad pass.
+    if (Math.abs(e.deltaY) < Math.abs(e.deltaX)) return;
+    e.preventDefault();
+    gridScroll.scrollTop += e.deltaY;
+  }, { passive: false });
+
   // Initial sticky positioning
   updateStickyMajorCells(gridScroll, sideWidth);
 
