@@ -1302,6 +1302,7 @@ select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); bo
     <button class="btn" id="printBtn" title="Print Gantt chart">🖨 Print</button>
     <button class="btn" id="settingsBtn">⚙ Settings</button>
     <button class="btn" id="pasteProjectBtn" style="display:none;" title="Paste project from clipboard">📋 Paste Project</button>
+    <button class="btn" id="importImageBtn" title="Extract milestones from a screenshot or image">📷 Import from Image</button>
     <button class="btn primary" id="newProjectBtn">+ New Project</button>
   </div>
 </div>
@@ -2154,6 +2155,8 @@ STATE._suspendUndoCapture = false; // prevent capturing during an undo/redo itse
 // children — that flag is stored alongside the data so paste honors the
 // original intent.
 const CLIPBOARD_KEY = 'studio-schedule-clipboard';
+const AI_API_KEY = 'studio-schedule-ai-api-key';
+const AI_PROVIDER_KEY = 'studio-schedule-ai-provider';
 
 function saveClipboardToStorage() {
   try {
@@ -8905,6 +8908,22 @@ function openSettings() {
               <h3 class="settings-tab-title">Sync &amp; Data</h3>
 
               <div class="settings-block">
+                <div class="settings-block-label">AI Image Import (Claude Vision)</div>
+                <div class="settings-block-help">
+                  Required for <strong style="color:var(--text);">📷 Import from Image</strong> — paste your Anthropic API key below. The key is stored only in this browser (localStorage) and is sent directly to Anthropic's API, never through our server. Get a key at <a href="https://console.anthropic.com/" target="_blank" style="color:var(--accent);">console.anthropic.com</a>.
+                </div>
+                <div style="display:flex; gap:6px; align-items:center;">
+                  <input type="password" id="aiApiKeyInput" placeholder="sk-ant-..." value="${escapeHtml(localStorage.getItem(AI_API_KEY) || '')}" style="flex:1; font-family:monospace; font-size:11px;" />
+                  <button class="btn small" onclick="toggleAiKeyVisibility()" id="aiKeyToggleBtn" title="Show / hide">👁</button>
+                  <button class="btn primary small" onclick="saveAiApiKey()">Save</button>
+                  ${localStorage.getItem(AI_API_KEY) ? '<button class="btn small danger" onclick="clearAiApiKey()">Clear</button>' : ''}
+                </div>
+                <div style="font-size:10px; color:var(--text-faint); margin-top:4px;">
+                  ${localStorage.getItem(AI_API_KEY) ? '<span style="color:var(--accent);">✓ Key saved. Ready to extract milestones from images.</span>' : '⚠ No key saved. Image import is disabled until a key is provided.'}
+                </div>
+              </div>
+
+              <div class="settings-block">
                 <div class="settings-block-label">Cloud Sync (Firebase)</div>
                 ${(() => {
                   const usingOverride = !!fbCfg;
@@ -9696,6 +9715,463 @@ function icsTimestamp(d) {
 
 // Copy the conference-feed URL to the clipboard. Used by Settings →
 // Sync & Data → Conference Calendar Feed.
+// ============== AI IMAGE IMPORT ==============
+//
+// Lets the user drop a screenshot (meeting notes, email snippet, hand-
+// written list, etc.) onto the app, extract the milestone list + due
+// dates from it via Claude's vision API, then either create a new
+// project around those milestones or merge them into an existing one.
+//
+// The API key lives in localStorage per browser — we never send it to
+// our Firebase backend or anyone else. The request goes directly from
+// the user's browser to Anthropic.
+
+function toggleAiKeyVisibility() {
+  const input = $('#aiApiKeyInput');
+  if (!input) return;
+  input.type = input.type === 'password' ? 'text' : 'password';
+}
+window.toggleAiKeyVisibility = toggleAiKeyVisibility;
+
+function saveAiApiKey() {
+  const input = $('#aiApiKeyInput');
+  if (!input) return;
+  const key = input.value.trim();
+  if (!key) { toast('Enter an API key first', 'error'); return; }
+  if (!key.startsWith('sk-ant-')) {
+    toast('Anthropic keys start with "sk-ant-". Double-check the key.', 'error');
+    return;
+  }
+  localStorage.setItem(AI_API_KEY, key);
+  toast('API key saved to this browser', 'success');
+  // Re-render settings to refresh the status line
+  closeModal();
+  openSettings();
+}
+window.saveAiApiKey = saveAiApiKey;
+
+function clearAiApiKey() {
+  localStorage.removeItem(AI_API_KEY);
+  toast('API key cleared', 'success');
+  closeModal();
+  openSettings();
+}
+window.clearAiApiKey = clearAiApiKey;
+
+// Convert an uploaded file (image) to a base64 string + media type for
+// the Anthropic Messages API's image content block.
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      // data:image/png;base64,xxxx
+      const match = /^data:([^;]+);base64,(.*)$/.exec(result);
+      if (!match) { reject(new Error('Could not parse file as base64')); return; }
+      resolve({ mediaType: match[1], data: match[2] });
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+// Call Claude's Messages API with an image + an extraction prompt. The
+// prompt asks for strict JSON so we can parse it without regex-tangles.
+async function extractMilestonesFromImage(file) {
+  const apiKey = localStorage.getItem(AI_API_KEY);
+  if (!apiKey) throw new Error('No API key. Save one in Settings → Sync & Data.');
+  const { mediaType, data } = await fileToBase64(file);
+  // Build a prompt that forces structured output — milestone names +
+  // ISO due dates. Includes current date context so the model can
+  // resolve relative references like "next Friday".
+  const todayStrLocal = todayStr();
+  const prompt = `You are extracting project schedule information from an image for a structural engineering firm.
+
+The image contains milestone names and their due dates (or a date range).
+Today's date is ${todayStrLocal}. Use this to resolve any relative dates.
+
+Return ONLY valid JSON matching this exact schema (no prose, no markdown fences):
+
+{
+  "projectHint": {
+    "name": "<project name if visible, else empty string>",
+    "number": "<project number if visible, else empty string>",
+    "client": "<client name if visible, else empty string>"
+  },
+  "milestones": [
+    { "name": "<milestone name>", "dueDate": "<YYYY-MM-DD>", "category": "<SD/DD/CD/CA/null>" }
+  ]
+}
+
+Rules:
+- Dates MUST be YYYY-MM-DD format. If only month+day given, assume the year closest to today's date going forward.
+- If no explicit date, omit that milestone rather than guess.
+- Keep milestone names concise — trim verbose descriptions to the essential name (e.g. "DSA Submittal", "CDs 50% Review").
+- Category: match standard phase abbreviations (SD, DD, CD, CA) if the image hints at them, else null.
+- If no project info visible, leave projectHint fields empty strings.`;
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 2048,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data } },
+          { type: 'text', text: prompt },
+        ],
+      }],
+    }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    let friendly = `API error ${resp.status}`;
+    if (resp.status === 401) friendly = 'API key rejected — check it in Settings.';
+    else if (resp.status === 429) friendly = 'Rate limited by Anthropic. Wait a minute and retry.';
+    else if (resp.status === 400) friendly = 'Request rejected by Anthropic. Image may be too large or unsupported.';
+    throw new Error(`${friendly}\n\n${errText.slice(0, 400)}`);
+  }
+  const result = await resp.json();
+  const text = result.content?.[0]?.text || '';
+  // Strip possible code fences, then parse
+  const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (e) {
+    throw new Error(`Could not parse Claude's response as JSON:\n${text.slice(0, 500)}`);
+  }
+  if (!parsed || !Array.isArray(parsed.milestones)) {
+    throw new Error('Response is missing a milestones array');
+  }
+  // Validate dates roughly
+  parsed.milestones = parsed.milestones.filter(m => m && m.name && /^\d{4}-\d{2}-\d{2}$/.test(m.dueDate || ''));
+  return parsed;
+}
+
+// Open the Import-from-Image modal. Steps:
+//   1. User picks an image file (or pastes one — we also wire paste)
+//   2. Analyze → calls extractMilestonesFromImage
+//   3. Review step — milestones listed, editable, user picks target project
+//   4. Apply — creates project (if new) and inserts milestones
+let _importState = null;  // { file, result, target: 'new'|'existing', targetProjectId? }
+
+async function openImportImageModal() {
+  if (!localStorage.getItem(AI_API_KEY)) {
+    const ok = await showConfirm(
+      'Image import needs an Anthropic API key. Open Settings now to add one?',
+      { title: 'API key required', confirmLabel: 'Open Settings', cancelLabel: 'Cancel', danger: false }
+    );
+    if (ok) openSettings();
+    return;
+  }
+  _importState = null;
+  renderImportImageModal();
+}
+window.openImportImageModal = openImportImageModal;
+
+function renderImportImageModal() {
+  const stage = _importState?.stage || 'pick';
+  let bodyHtml = '';
+  if (stage === 'pick') {
+    bodyHtml = `
+      <div style="padding:16px;">
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:12px;">
+          Upload a screenshot, photo, or image containing milestone names and due dates. Claude will extract them automatically.
+        </div>
+        <div id="imageDropZone" style="border:2px dashed var(--border-strong); border-radius:6px; padding:40px 20px; text-align:center; cursor:pointer; background:var(--panel-2); transition:border-color 0.15s;">
+          <div style="font-size:36px; margin-bottom:10px;">📷</div>
+          <div style="font-size:13px; color:var(--text); margin-bottom:4px;"><strong>Click to choose an image</strong></div>
+          <div style="font-size:11px; color:var(--text-faint);">or drag &amp; drop · or paste from clipboard (Ctrl+V)</div>
+        </div>
+        <input type="file" id="imageFileInput" accept="image/*" style="display:none;" />
+      </div>
+    `;
+  } else if (stage === 'analyzing') {
+    bodyHtml = `
+      <div style="padding:40px 20px; text-align:center;">
+        <div style="font-size:36px; margin-bottom:16px;">🤖</div>
+        <div style="font-size:14px; color:var(--text); margin-bottom:6px;">Analyzing image with Claude...</div>
+        <div style="font-size:11px; color:var(--text-faint);">This usually takes 5–15 seconds.</div>
+        ${_importState?.imageDataUrl ? `<img src="${_importState.imageDataUrl}" style="max-width:100%; max-height:200px; margin-top:16px; border-radius:4px; opacity:0.6;" />` : ''}
+      </div>
+    `;
+  } else if (stage === 'review') {
+    const r = _importState.result;
+    const projOpts = STATE.data.projects.map(p =>
+      `<option value="${p.id}">${escapeHtml((p.number ? p.number + ' · ' : '') + p.name)}</option>`
+    ).join('');
+    const catOpts = STATE.data.categories.map(c =>
+      `<option value="${c.id}">${escapeHtml(c.name)}</option>`
+    ).join('');
+    const matchCat = (hint) => {
+      if (!hint) return '';
+      const cat = STATE.data.categories.find(c => c.name.toLowerCase() === hint.toLowerCase());
+      return cat ? cat.id : '';
+    };
+    const milestonesHtml = r.milestones.map((m, i) => `
+      <div class="import-ms-row" style="display:grid; grid-template-columns: 1fr 130px 130px auto; gap:8px; align-items:center; padding:6px 0; border-bottom:1px solid var(--grid);">
+        <input type="text" data-ims-field="name" data-ims-idx="${i}" value="${escapeHtml(m.name)}" style="font-size:12px;" />
+        <input type="date" data-ims-field="dueDate" data-ims-idx="${i}" value="${m.dueDate}" style="font-size:12px;" />
+        <select data-ims-field="categoryId" data-ims-idx="${i}" style="font-size:12px;">
+          <option value="">— None —</option>
+          ${catOpts.replace(new RegExp(`value="${matchCat(m.category)}"`), `value="${matchCat(m.category)}" selected`)}
+        </select>
+        <button class="btn small danger" onclick="removeImportMilestone(${i})" title="Remove">×</button>
+      </div>
+    `).join('');
+    const hint = r.projectHint || {};
+    bodyHtml = `
+      <div style="padding:16px; max-height:70vh; overflow-y:auto;">
+        <div style="font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.4px; font-weight:600; color:var(--accent); margin-bottom:8px;">Target Project</div>
+        <div style="display:flex; gap:16px; margin-bottom:10px; font-size:12px;">
+          <label><input type="radio" name="importTarget" value="new" ${_importState.target !== 'existing' ? 'checked' : ''} onchange="setImportTarget('new')" /> New project</label>
+          <label><input type="radio" name="importTarget" value="existing" ${_importState.target === 'existing' ? 'checked' : ''} onchange="setImportTarget('existing')" /> Existing project</label>
+        </div>
+        <div id="importTargetBody">
+          ${_importState.target === 'existing' ? `
+            <select id="importTargetProjectId" class="field-input" style="width:100%; font-size:12px;">
+              ${projOpts}
+            </select>
+          ` : `
+            <div style="display:grid; grid-template-columns: 140px 1fr; gap:8px; margin-bottom:6px;">
+              <input type="text" id="importProjNumber" placeholder="Project #" value="${escapeHtml(hint.number || '')}" style="font-size:12px;" />
+              <input type="text" id="importProjName" placeholder="Project name" value="${escapeHtml(hint.name || '')}" style="font-size:12px;" />
+            </div>
+            <input type="text" id="importProjClient" placeholder="Client (optional)" value="${escapeHtml(hint.client || '')}" style="width:100%; font-size:12px;" />
+          `}
+        </div>
+
+        <div style="font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.4px; font-weight:600; color:var(--accent); margin:16px 0 8px 0; display:flex; justify-content:space-between; align-items:center;">
+          <span>Extracted Milestones (${r.milestones.length})</span>
+          <button class="btn small" onclick="addImportMilestone()">+ Add row</button>
+        </div>
+        <div id="importMilestoneList">
+          ${r.milestones.length === 0 ? '<div style="color:var(--text-faint); font-size:12px; padding:12px 0;">No milestones were extracted. Add rows manually or re-upload a clearer image.</div>' : milestonesHtml}
+        </div>
+      </div>
+    `;
+  }
+  const stageTitles = { pick: 'Import from Image', analyzing: 'Analyzing...', review: 'Review Extracted Milestones' };
+  const footer = stage === 'review' ? `
+    <div class="modal-footer">
+      <button class="btn" onclick="_importState={stage:'pick'}; renderImportImageModal();">‹ Back</button>
+      <button class="btn primary" onclick="applyImportMilestones()">Apply</button>
+    </div>
+  ` : '';
+  $('#modalRoot').innerHTML = `
+    <div class="modal-overlay">
+      <div class="modal" style="max-width:720px; width:90vw;">
+        <div class="modal-header">
+          <div class="modal-title">${stageTitles[stage]}</div>
+          <button class="detail-close" onclick="closeModal(); _importState=null;">×</button>
+        </div>
+        <div class="modal-body">${bodyHtml}</div>
+        ${footer}
+      </div>
+    </div>
+  `;
+  // Stage-specific wiring
+  if (stage === 'pick') {
+    const dropZone = $('#imageDropZone');
+    const fileInput = $('#imageFileInput');
+    dropZone?.addEventListener('click', () => fileInput?.click());
+    fileInput?.addEventListener('change', (e) => {
+      const file = e.target.files?.[0];
+      if (file) handleImportFile(file);
+    });
+    dropZone?.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.style.borderColor = 'var(--accent)';
+    });
+    dropZone?.addEventListener('dragleave', () => {
+      dropZone.style.borderColor = '';
+    });
+    dropZone?.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.style.borderColor = '';
+      const file = e.dataTransfer?.files?.[0];
+      if (file) handleImportFile(file);
+    });
+    // Also accept paste
+    document.addEventListener('paste', importPasteHandler);
+  } else if (stage === 'review') {
+    // Wire field edits
+    document.querySelectorAll('[data-ims-field]').forEach(el => {
+      el.addEventListener('change', () => {
+        const idx = parseInt(el.dataset.imsIdx, 10);
+        const field = el.dataset.imsField;
+        if (_importState.result.milestones[idx]) {
+          _importState.result.milestones[idx][field] = el.value;
+        }
+      });
+    });
+  }
+}
+
+let importPasteHandler = null;
+importPasteHandler = (e) => {
+  // Only relevant while the pick-stage modal is open
+  if (_importState && _importState.stage !== 'pick' && _importState.stage !== undefined) return;
+  if (!$('#imageDropZone')) {
+    document.removeEventListener('paste', importPasteHandler);
+    return;
+  }
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) {
+        handleImportFile(file);
+        e.preventDefault();
+        return;
+      }
+    }
+  }
+};
+
+async function handleImportFile(file) {
+  if (!file.type.startsWith('image/')) {
+    toast('Please choose an image file', 'error');
+    return;
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    toast('Image too large (max 5MB). Resize and retry.', 'error');
+    return;
+  }
+  // Show preview + loading state
+  const dataUrl = await new Promise(res => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.readAsDataURL(file);
+  });
+  _importState = { stage: 'analyzing', file, imageDataUrl: dataUrl, target: 'new' };
+  renderImportImageModal();
+  try {
+    const result = await extractMilestonesFromImage(file);
+    _importState.result = result;
+    _importState.stage = 'review';
+    renderImportImageModal();
+  } catch (e) {
+    console.error('[import] extraction failed:', e);
+    _importState.stage = 'pick';
+    renderImportImageModal();
+    await showConfirm(`Could not extract milestones:\n\n${e.message}`, {
+      title: 'Extraction failed', confirmLabel: 'OK', cancelLabel: '', danger: false
+    });
+  }
+}
+window.handleImportFile = handleImportFile;
+
+function setImportTarget(target) {
+  _importState.target = target;
+  renderImportImageModal();
+}
+window.setImportTarget = setImportTarget;
+
+function addImportMilestone() {
+  if (!_importState?.result) return;
+  _importState.result.milestones.push({ name: 'New Milestone', dueDate: todayStr(), category: null });
+  renderImportImageModal();
+}
+window.addImportMilestone = addImportMilestone;
+
+function removeImportMilestone(idx) {
+  if (!_importState?.result) return;
+  _importState.result.milestones.splice(idx, 1);
+  renderImportImageModal();
+}
+window.removeImportMilestone = removeImportMilestone;
+
+async function applyImportMilestones() {
+  if (!_importState?.result) return;
+  const target = _importState.target;
+  let projectId;
+
+  if (target === 'existing') {
+    projectId = $('#importTargetProjectId')?.value;
+    if (!projectId) { toast('Select a project', 'error'); return; }
+  } else {
+    const name = $('#importProjName')?.value.trim();
+    if (!name) { toast('Project name required', 'error'); return; }
+    const number = $('#importProjNumber')?.value.trim() || '';
+    const client = $('#importProjClient')?.value.trim() || '';
+    // Duplicate check — same shape as createProject
+    const dupByNumber = number ? STATE.data.projects.find(p => (p.number || '').trim().toLowerCase() === number.toLowerCase()) : null;
+    const dupByName = STATE.data.projects.find(p => p.name.trim().toLowerCase() === name.toLowerCase());
+    if (dupByNumber || dupByName) {
+      const dup = dupByNumber || dupByName;
+      const reason = dupByNumber ? `project number "${number}"` : `project name "${name}"`;
+      const ok = await showConfirm(
+        `A project with the same ${reason} already exists.\n\nCreate this one anyway?`,
+        { title: 'Duplicate Project', confirmLabel: 'Create anyway', cancelLabel: 'Cancel', danger: false }
+      );
+      if (!ok) return;
+    }
+    // Build project the same way createProject does, so it fits in with everything else
+    const now = new Date().toISOString();
+    const managerId = STATE.data.currentUserId;
+    const defaultStatus = STATE.data.statuses[0]?.id || 'st_notstarted';
+    const newProject = {
+      id: uid('p'),
+      name, number, client,
+      managerId,
+      statusId: defaultStatus,
+      milestones: [],
+      createdAt: now,
+      createdBy: STATE.data.currentUserId,
+      visibility: 'shared',
+      history: [],
+    };
+    STATE.data.projects.unshift(newProject);
+    projectId = newProject.id;
+    logHistory(projectId, `Project created from image import`);
+  }
+
+  const project = getProject(projectId);
+  if (!project) { toast('Project not found', 'error'); return; }
+  if (!project.milestones) project.milestones = [];
+
+  const defaultStatus = STATE.data.statuses[0]?.id || 'st_notstarted';
+  let added = 0;
+  for (const m of _importState.result.milestones) {
+    if (!m.name || !m.dueDate) continue;
+    const newMs = {
+      id: uid('m'),
+      name: m.name,
+      dueDate: m.dueDate,
+      categoryId: m.categoryId || '',
+      statusId: defaultStatus,
+      assigneeIds: [],
+      tasks: [],
+      notes: '',
+      visibility: 'shared',
+      progress: 0,
+      createdBy: STATE.data.currentUserId || '',
+    };
+    project.milestones.push(newMs);
+    added++;
+  }
+  logHistory(projectId, `Imported ${added} milestone${added === 1 ? '' : 's'} from image`);
+  saveData();
+  closeModal();
+  _importState = null;
+  STATE.selectedItem = { type: 'project', projectId };
+  project.expanded = true;
+  renderAll();
+  toast(`Added ${added} milestone${added === 1 ? '' : 's'} to "${project.name}"`, 'success');
+}
+window.applyImportMilestones = applyImportMilestones;
+
 function copyConfFeedUrl() {
   const url = $('#confFeedUrl');
   if (!url) return;
@@ -10074,6 +10550,7 @@ async function init() {
       renderAll();
     }
   });
+  $('#importImageBtn')?.addEventListener('click', openImportImageModal);
   $('#currentUserBadge').addEventListener('click', promptForUserIdentity);
   $('#undoBtn').addEventListener('click', performUndo);
   $('#redoBtn').addEventListener('click', performRedo);
